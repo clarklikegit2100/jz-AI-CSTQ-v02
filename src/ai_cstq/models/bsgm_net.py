@@ -579,7 +579,10 @@ class BSGMCellTrack(nn.Module):
             num_track = track_query_hs_embeds.shape[1]
             # Prepend: [track_queries | object_queries]
             tgt = torch.cat([track_query_hs_embeds, tgt], dim=1)
-            ref_pts = torch.cat([inverse_sigmoid(track_query_boxes[..., :2]), ref_pts], dim=1)
+            # ref_pts can be 2D (one-stage) or 4D (two-stage); match track ref dims
+            ndim = ref_pts.shape[-1]
+            track_ref = inverse_sigmoid(track_query_boxes[..., :ndim].clamp(1e-6, 1 - 1e-6))
+            ref_pts = torch.cat([track_ref, ref_pts], dim=1)
 
         # ---- Build self-attention mask (keep track / detection groups separate) ----
         N_total = tgt.shape[1]

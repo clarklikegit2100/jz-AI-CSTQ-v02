@@ -227,6 +227,7 @@ def run_one_epoch(src_tag: str, dst_tag: str, name: str, seqs: list,
         "avg_loss":    avg_loss_final,
         "avg_ms":      avg_ms_final,
         "total_min":   t_total / 60,
+        "model_state": {k: v.cpu() for k, v in model.state_dict().items()},
     }
 
 
@@ -405,6 +406,19 @@ def main():
                   f"平均批次: {result['avg_ms']:.0f}ms  "
                   f"总耗时: {result['total_min']:.1f} min  "
                   f"错误批次: {result['n_err']}")
+
+            # Save checkpoint
+            ckpt_dir = ROOT / "results" / dst_tag
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / "checkpoint_epoch1.pth"
+            torch.save({
+                "model_state": result["model_state"],
+                "cfg": BSGM_CFG,
+                "epoch": 1,
+                "avg_loss": result["avg_loss"],
+                "dataset": name,
+            }, ckpt_path)
+            print(f"    Checkpoint 已保存: {ckpt_path}")
         except Exception:
             print(f"\n  [{name}] 失败:")
             traceback.print_exc()

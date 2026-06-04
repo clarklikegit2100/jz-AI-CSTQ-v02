@@ -182,10 +182,26 @@ def predictions_to_ctc(
         mask_path = os.path.join(out_dir, f"mask{t:03d}.tif")
         write_ctc_mask(mask_path, frame_mask)
 
-    # Write man_track.txt
-    track_path = os.path.join(out_dir, "man_track.txt")
-    write_man_track(track_path, tracks)
-    return tracks
+    # Rebuild tracking table from actual mask pixels to ensure consistency
+    # (avoids TRAMeasure error when a track_id in the table has no mask pixels)
+    mask_files = sorted(Path(out_dir).glob("mask???.tif"))
+    verified_tracks: Dict[int, Tuple[int, int, int]] = {}
+    for mf in mask_files:
+        t_frame = int(mf.stem.replace("mask", ""))
+        m = read_ctc_mask(str(mf))
+        for tid in np.unique(m):
+            if tid == 0:
+                continue
+            if tid not in verified_tracks:
+                verified_tracks[tid] = (t_frame, t_frame, 0)
+            else:
+                t_s, _, par = verified_tracks[tid]
+                verified_tracks[tid] = (t_s, t_frame, par)
+
+    # Write res_track.txt (CTC evaluation expects this name in RES dir)
+    track_path = os.path.join(out_dir, "res_track.txt")
+    write_man_track(track_path, verified_tracks)
+    return verified_tracks
 
 
 # ---------------------------------------------------------------------------
@@ -193,21 +209,24 @@ def predictions_to_ctc(
 # ---------------------------------------------------------------------------
 
 def run_ctc_eval(
-    res_dir: str,
-    gt_dir: str,
-    eval_binary_dir: str,
+    parent_dir: str,
     sequence: str,
+    eval_binary_dir: str,
+    num_digits: int = 3,
     metrics: List[str] = ("TRA", "SEG", "DET"),
 ) -> Dict[str, float]:
     """
     Run official CTC evaluation binaries and parse results.
 
+    Binary usage: TRAMeasure.exe <parent_dir> <sequence> <num_digits>
+    parent_dir must contain both {sequence}_RES/ and {sequence}_GT/.
+
     Parameters
     ----------
-    res_dir        : path to RES/ folder (model output masks)
-    gt_dir         : path to GT/ folder (ground truth)
+    parent_dir     : directory containing {seq}_RES/ and {seq}_GT/
+    sequence       : sequence name, e.g. '01'
     eval_binary_dir: directory containing TRAMeasure, SEGMeasure, DETMeasure
-    sequence       : sequence name (e.g., '01')
+    num_digits     : frame number digits (3 for mask000.tif)
     metrics        : which metrics to compute
 
     Returns
@@ -225,16 +244,31 @@ def run_ctc_eval(
             scores[metric] = float("nan")
             continue
         try:
-            cmd = [binary, res_dir, gt_dir, "3"]
+            cmd = [binary, str(parent_dir), str(sequence), str(num_digits)]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            # Parse score from last line like "TRA measure: 0.9321"
-            for line in reversed(result.stdout.splitlines()):
-                m = re.search(r"[\d.]+$", line)
+            output = result.stdout + result.stderr
+            # Parse score from lines like "TRA measure: 0.9321" or "SEG measure: 0.8800"
+            found = False
+            for line in reversed(output.splitlines()):
+                m = re.search(r"measure[:\s]+([\d.]+)", line, re.IGNORECASE)
                 if m:
-                    scores[metric] = float(m.group())
+                    scores[metric] = float(m.group(1))
+                    found = True
                     break
-            else:
+            if not found:
+                # Fallback: last float on last non-empty line
+                for line in reversed(output.splitlines()):
+                    m = re.search(r"[\d.]+$", line.strip())
+                    if m:
+                        try:
+                            scores[metric] = float(m.group())
+                            found = True
+                            break
+                        except ValueError:
+                            pass
+            if not found:
                 scores[metric] = float("nan")
+                print(f"[ctc_io] Could not parse {metric} score. Output:\n{output[:300]}")
         except Exception as e:
             print(f"[ctc_io] Error running {metric}: {e}")
             scores[metric] = float("nan")
