@@ -1,0 +1,27 @@
+# BSGM-CellTrack requirements
+# Install: pip install -r requirements.txt
+
+# Core deep learning
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Image I/O
+tifffile>=2023.1.23
+Pillow>=10.0.0
+
+# Data / numerical
+numpy>=1.24.0
+scipy>=1.11.0           # linear_sum_assignment for Hungarian matcher
+
+# COCO annotation utilities (optional but strongly recommended)
+pycocotools>=2.0.6
+
+# Config
+PyYAML>=6.0
+
+# Visualisation (optional)
+matplotlib>=3.7.0
+
+# Mamba CUDA extension (optional — use only if available, code falls back to pure-PyTorch)
+# mamba-ssm>=1.2.0
+# causal-conv1d>=1.1.0

@@ -1,0 +1,57 @@
+# ============================================================
+# BSGM-CellTrack: Dry-run / smoke-test configuration
+# Tiny model that runs in < 2 min on CPU with synthetic data.
+# ============================================================
+
+base_config: base_bsgm.yaml
+
+dataset: dryrun
+data_dir: F:/GitHub/jz-AI-CSTQ-v02/data/dryrun
+output_dir: F:/GitHub/jz-AI-CSTQ-v02/results/dryrun
+
+# Tiny images — Swin-T works down to 256 with window_size=4
+target_size: [256, 256]
+swin_window_size: 4        # safe for 8×8 smallest feature map (256/4/4/2/2/2)
+
+# Very small transformer — fast on CPU
+hidden_dim: 256            # must match FPNNeck GroupNorm(32, out_channels)
+nheads: 8
+enc_layers: 1
+dec_layers: 2
+dim_feedforward: 256
+dropout: 0.0               # no stochasticity for deterministic tests
+
+# Few queries / levels
+num_queries: 20
+num_feature_levels: 4
+dec_n_points: 2
+
+# Compact auxiliary heads
+mask_channels: 32
+mamba_d_state: 4
+mamba_d_conv: 4
+graph_topk: 4
+graph_heads: 2
+bayesian_dropout: 0.0
+bayesian_eval: false
+
+# No cell divisions or masks for speed (can override per test)
+with_div: false
+masks: true
+two_stage: true
+with_box_refine: true
+
+# Training: only 2 epochs, no warmup
+epochs: 2
+warmup_epochs: 0
+batch_size: 1
+num_workers: 0
+lr: 0.0002
+lr_backbone: 0.00002
+lr_drop: 50
+weight_decay: 0.0001
+clip_max_norm: 0.1
+use_amp: false             # disable AMP for CPU runs
+
+# Checkpoint
+save_checkpoint_every: 1

@@ -1,0 +1,19 @@
+# Pluripotent Stem Cells (PSC) — BSGM configuration
+base_config: base_bsgm.yaml
+
+dataset: ctcpsc
+data_dir: F:/GitHub/jz-AI-CSTQ-v02/data
+output_dir: F:/GitHub/jz-AI-CSTQ-v02/results/ctcpsc_bsgm
+
+target_size: [512, 512]
+num_queries: 500            # dense PSC colonies
+batch_size: 1
+
+backbone: swin_t
+mamba_d_state: 32
+graph_topk: 24              # dense culture
+graph_heads: 4
+bayesian_dropout: 0.1
+
+epochs: 24
+warmup_epochs: 8

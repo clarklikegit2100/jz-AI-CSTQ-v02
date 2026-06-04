@@ -1,0 +1,25 @@
+# Gowt1 GFP-Actin Drosophila — BSGM configuration
+base_config: base_bsgm.yaml
+
+dataset: ctcgowt1
+data_dir: F:/GitHub/jz-AI-CSTQ-v02/data
+output_dir: F:/GitHub/jz-AI-CSTQ-v02/results/ctcgowt1_bsgm
+
+# Gowt1: sparse cells, large images
+target_size: [768, 768]
+num_queries: 200
+batch_size: 1
+
+# Larger Swin for bigger images
+backbone: swin_s
+swin_window_size: 7
+
+# Standard Mamba settings
+mamba_d_state: 16
+
+# Small graph (sparse cells)
+graph_topk: 8
+graph_heads: 4
+
+epochs: 30
+lr_drop: 25

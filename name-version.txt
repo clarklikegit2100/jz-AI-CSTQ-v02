@@ -1,0 +1,4 @@
+这个是我的Deep CSTQ 的一些记录，我已经实现了  v1.0  (Deep-CSTQ-GR ) 于 2025-12-31 and v2.0 (Deep-CSTQ-MG) on 2026-03-31. 当前项目应该正在实现 v3.0 或者是v4.0, 具体属于哪一个版本，我有点判断不清楚，或许是v3.0 or v4.0 甚至是v5.0，你来判断，同时你可以给这个项目起一个更好听的名字，这个pdf文件仅供参考。
+
+
+I updated F:\GitHub\99-CellTracktor\code-ubu2004\data . since this is big data. you can scan it first and  you can choose some data from the that data dir to run some smaple test for this project jz-ai-cstq-v02.  the sample datasets including 6 dataset nows. Fluo-N2DH-SIM+, Fluo-N2DH-GOWT1, Fluo-C2DL-Huh7, PhC-C2DH-U373, DIC-C2DH-HeLa  , PhC-C2DL-PSC

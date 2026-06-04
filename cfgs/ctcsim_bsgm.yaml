@@ -1,0 +1,19 @@
+# Simulated CTC data — BSGM configuration (good for initial training/debugging)
+base_config: base_bsgm.yaml
+
+dataset: ctcsim
+data_dir: F:/GitHub/jz-AI-CSTQ-v02/data
+output_dir: F:/GitHub/jz-AI-CSTQ-v02/results/ctcsim_bsgm
+
+target_size: [512, 512]
+num_queries: 400
+batch_size: 2               # sim data is easier, allow larger batch
+
+backbone: swin_t
+mamba_d_state: 16
+graph_topk: 16
+bayesian_dropout: 0.05      # less noise on clean simulated data
+
+epochs: 20
+warmup_epochs: 5
+lr_drop: 15

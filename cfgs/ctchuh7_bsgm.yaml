@@ -1,0 +1,25 @@
+# HuH7 hepatocellular carcinoma — BSGM configuration
+base_config: base_bsgm.yaml
+
+dataset: ctchuh7
+data_dir: F:/GitHub/jz-AI-CSTQ-v02/data
+output_dir: F:/GitHub/jz-AI-CSTQ-v02/results/ctchuh7_bsgm
+
+# HuH7 specific: larger images, more cells per frame
+target_size: [512, 512]
+num_queries: 300
+batch_size: 1
+
+# Swin-T backbone
+backbone: swin_t
+swin_window_size: 7
+
+# Temporal Mamba: more state for complex cell motion
+mamba_d_state: 32
+
+# Graph: larger neighbourhood for dense HuH7 culture
+graph_topk: 20
+graph_heads: 4
+
+# Uncertainty: slightly higher dropout for robustness
+bayesian_dropout: 0.1

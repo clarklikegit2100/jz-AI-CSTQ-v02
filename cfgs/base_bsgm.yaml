@@ -1,0 +1,76 @@
+# ============================================================
+# BSGM-CellTrack: Base Configuration
+# ============================================================
+
+# --- Data ---
+dataset: ctchuh7
+data_dir: F:/GitHub/jz-AI-CSTQ-v02/data
+output_dir: F:/GitHub/jz-AI-CSTQ-v02/results/default
+target_size: [512, 512]
+num_workers: 4
+batch_size: 1
+
+# --- Backbone ---
+backbone: swin_t               # swin_t | swin_s | swin_b
+backbone_in_channels: 3        # 1 (grayscale) replicated to 3
+swin_window_size: 7
+swin_pretrained: null          # path to .pth pretrained weights (optional)
+
+# --- Transformer ---
+hidden_dim: 256
+nheads: 8
+enc_layers: 4
+dec_layers: 6
+dim_feedforward: 1024
+dropout: 0.1
+num_feature_levels: 4
+dec_n_points: 4
+
+# --- Queries ---
+num_queries: 400               # max detections per frame
+num_classes: 1                 # just "cell"
+
+# --- Tracking ---
+tracking: true
+with_div: true                 # cell division support (8D boxes)
+masks: true                    # instance segmentation head
+mask_channels: 128
+two_stage: true                # two-stage region proposals
+with_box_refine: true
+
+# --- Mamba ---
+mamba_d_state: 16
+mamba_d_conv: 4
+
+# --- Graph ---
+graph_topk: 16
+graph_heads: 4
+
+# --- Bayesian ---
+bayesian_dropout: 0.1
+bayesian_eval: false
+mc_samples: 1                  # >1 for MC uncertainty at inference
+
+# --- Training ---
+epochs: 24
+warmup_epochs: 8               # backbone frozen, detection only
+lr: 0.0002
+lr_backbone: 0.00002
+lr_drop: 20
+weight_decay: 0.0001
+clip_max_norm: 0.1
+use_amp: true                  # mixed precision
+save_checkpoint_every: 4
+
+# --- Loss weights ---
+cls_loss_coef: 4.0
+bbox_loss_coef: 5.0
+giou_loss_coef: 2.0
+mask_loss_coef: 5.0
+dice_loss_coef: 5.0
+set_cost_class: 1.0
+set_cost_bbox: 5.0
+set_cost_giou: 2.0
+set_cost_mask: 1.0
+focal_alpha: 0.25
+focal_gamma: 2.0

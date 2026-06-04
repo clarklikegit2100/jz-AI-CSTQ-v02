@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual envs / conda
+.env
+.venv
+env/
+venv/
+
+# Data — large TIF images and COCO JSONs are NOT committed
+# (use prepare_data_from_ctracktor.py / prepare_real_data.py to regenerate)
+data/*/CTC/
+data/*/COCO/annotations/*.json
+data/dryrun/
+
+# Results / checkpoints
+results/
+*.pth
+*.pt
+*.ckpt
+
+# Logs
+*.log
+logs/
+
+# PDFs (papers)
+*.pdf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp scripts
+scripts/_inspect_ctc.py
+scripts/_verify_data.py
