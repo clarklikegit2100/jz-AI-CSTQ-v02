@@ -31,20 +31,27 @@ from pathlib import Path
 
 import torch
 
-ROOT    = Path(__file__).parent.parent
-SRC     = Path("F:/GitHub/99-CellTracktor/code-ubu2004/data")
-DST     = ROOT / "data"
+ROOT          = Path(__file__).parent.parent
+SRC           = Path("F:/GitHub/99-CellTracktor/code-ubu2004/data")
+DEEP_CSTQ_SRC = Path("F:/GitHub/Deep_CSTQ_Datasets/src/output")
+DST           = ROOT / "data"
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-# Dataset registry: key -> (src_tag, dst_tag, full_name, max_train_seqs)
+# Dataset registry:
+#   key -> (src_tag, dst_tag, full_name, max_train_seqs, src_type)
+#   src_type="ctracktor": SRC/{src_tag}/CTC/train/{seq}/
+#   src_type="deep":      DEEP_CSTQ_SRC/{src_tag}/train/{seq}/  (clean GT from Deep_CSTQ_Datasets)
 DATASETS = {
-    "huh7":  ("ctchuh7",  "ctc-huh7",  "Fluo-C2DL-Huh7",   None),
-    "dhela": ("ctcdhela", "ctc-dhela", "DIC-C2DH-HeLa",     None),
-    "gowt1": ("ctcgowt1", "ctc-gowt1", "Fluo-N2DH-GOWT1",  None),
-    "sim":   ("ctcsim",   "ctc-sim",   "Fluo-N2DH-SIM+",   None),
-    "u373":  ("ctcu373",  "ctc-u373",  "PhC-C2DH-U373",    None),
-    "psc":   ("ctcpscv2", "ctc-psc",  "PhC-C2DL-PSC",     4),   # cap at 4 seqs
+    # 99-CellTracktor sources (clean GT)
+    "dhela": ("ctcdhela", "ctc-dhela", "DIC-C2DH-HeLa",    None, "ctracktor"),
+    "sim":   ("ctcsim",   "ctc-sim",   "Fluo-N2DH-SIM+",   None, "ctracktor"),
+    "psc":   ("ctcpscv2", "ctc-psc",   "PhC-C2DL-PSC",     4,    "ctracktor"),
+    # Deep_CSTQ_Datasets sources — 20 augmented datasets per seq, continuous GT
+    # max_seqs caps training to keep total <1h per dataset at ~785ms/batch
+    "huh7":  ("Fluo-C2DL-Huh7",  "ctc-huh7",  "Fluo-C2DL-Huh7",  32, "deep"),  # 32×30f≈960 batches ~12min
+    "u373":  ("PhC-C2DH-U373",   "ctc-u373",  "PhC-C2DH-U373",   12, "deep"),  # 12×115f≈1380 batches ~18min
+    "gowt1": ("Fluo-N2DH-GOWT1", "ctc-gowt1", "Fluo-N2DH-GOWT1", 16, "deep"),  # 16×91f≈1456 batches ~19min
 }
 
 DATASET_ORDER = ["huh7", "dhela", "gowt1", "sim", "u373", "psc"]
@@ -72,19 +79,24 @@ LOSS_CFG = dict(
 # COCO generation
 # ---------------------------------------------------------------------------
 
-def get_train_seqs(src_tag: str, max_seqs=None):
-    train_dir = SRC / src_tag / "CTC" / "train"
+def get_train_dir(src_tag: str, src_type: str) -> Path:
+    if src_type == "deep":
+        return DEEP_CSTQ_SRC / src_tag / "train"
+    return SRC / src_tag / "CTC" / "train"
+
+
+def get_train_seqs(src_tag: str, src_type: str, max_seqs=None):
+    train_dir = get_train_dir(src_tag, src_type)
     seqs = sorted([d.name for d in train_dir.iterdir()
-                   if d.is_dir() and not d.name.endswith("_GT")])
+                   if d.is_dir() and not d.name.endswith(("_GT", "_RES"))])
     if max_seqs:
         seqs = seqs[:max_seqs]
     return seqs
 
 
-def ensure_coco(src_tag: str, dst_tag: str, seqs: list, regen: bool) -> Path:
+def ensure_coco(src_tag: str, dst_tag: str, src_type: str, seqs: list, regen: bool) -> Path:
     """
     Generate (or reuse) COCO JSON for the given train sequences.
-    img_dir = SRC/{src_tag}/CTC/train/   (relative file_name: {seq}/t000.tif)
     Returns path to JSON file.
     """
     from create_coco_from_ctc import process_split
@@ -105,13 +117,18 @@ def ensure_coco(src_tag: str, dst_tag: str, seqs: list, regen: bool) -> Path:
 
     print(f"    生成 COCO 标注，共 {len(seqs)} 个序列 ...")
     t0 = time.perf_counter()
+    if src_type == "deep":
+        data_dir_for_coco = str(DEEP_CSTQ_SRC / src_tag)
+    else:
+        data_dir_for_coco = str(SRC / src_tag)
     process_split(
-        data_dir=str(SRC / src_tag),
+        data_dir=data_dir_for_coco,
         split="train",
         sequences=seqs,
         use_rle=False,
         out_filename="instances_train_full.json",
         out_dir=str(ann_dir),
+        no_ctc_subdir=(src_type == "deep"),
     )
     elapsed = time.perf_counter() - t0
     print(f"    COCO 生成完毕 ({elapsed:.1f}s)")
@@ -122,8 +139,8 @@ def ensure_coco(src_tag: str, dst_tag: str, seqs: list, regen: bool) -> Path:
 # One epoch
 # ---------------------------------------------------------------------------
 
-def run_one_epoch(src_tag: str, dst_tag: str, name: str, seqs: list,
-                  ann_file: Path, device: torch.device,
+def run_one_epoch(src_tag: str, dst_tag: str, src_type: str, name: str,
+                  seqs: list, ann_file: Path, device: torch.device,
                   img_size: int, print_every: int) -> dict:
     from ai_cstq.datasets.ctc_coco import CTCCocoDataset, collate_fn
     from ai_cstq.models import build_model
@@ -132,7 +149,7 @@ def run_one_epoch(src_tag: str, dst_tag: str, name: str, seqs: list,
     from torch.utils.data import DataLoader
     import torch.nn.functional as F
 
-    img_dir = str(SRC / src_tag / "CTC" / "train")
+    img_dir = str(get_train_dir(src_tag, src_type))
 
     dataset = CTCCocoDataset(
         img_dir=img_dir,
@@ -247,20 +264,21 @@ def _patch_coco_script():
     _orig = m.process_split
 
     def patched(data_dir, split, sequences, use_rle,
-                out_filename=None, out_dir=None):
+                out_filename=None, out_dir=None, no_ctc_subdir=False):
         # Call the original but intercept the output path
         if out_filename is None and out_dir is None:
             return _orig(data_dir, split, sequences, use_rle)
 
-        # Temporarily run in a way that writes to a custom location
-        # by calling the internals directly
         import tifffile
         import numpy as np
 
         def read_tif(p):
             return tifffile.imread(str(p))
 
-        ctc_dir = os.path.join(data_dir, "CTC", split)
+        if no_ctc_subdir:
+            ctc_dir = os.path.join(data_dir, split)
+        else:
+            ctc_dir = os.path.join(data_dir, "CTC", split)
         _out_dir = out_dir or os.path.join(data_dir, "COCO", "annotations")
         _out_fn  = out_filename or f"instances_{split}.json"
         os.makedirs(_out_dir, exist_ok=True)
@@ -382,20 +400,20 @@ def main():
     t_grand_start = time.perf_counter()
 
     for key in args.datasets:
-        src_tag, dst_tag, name, max_seqs = DATASETS[key]
+        src_tag, dst_tag, name, max_seqs, src_type = DATASETS[key]
         print(f"{'='*72}")
-        print(f"  [{name}]  ({dst_tag})")
+        print(f"  [{name}]  ({dst_tag})  [源: {src_type}]")
         print(f"{'='*72}")
 
         try:
-            seqs = get_train_seqs(src_tag, max_seqs)
+            seqs = get_train_seqs(src_tag, src_type, max_seqs)
             print(f"    训练序列: {seqs[:4]}{'...' if len(seqs)>4 else ''} "
                   f"共 {len(seqs)} 条")
 
-            ann_file = ensure_coco(src_tag, dst_tag, seqs, args.regen_coco)
+            ann_file = ensure_coco(src_tag, dst_tag, src_type, seqs, args.regen_coco)
 
             result = run_one_epoch(
-                src_tag=src_tag, dst_tag=dst_tag, name=name,
+                src_tag=src_tag, dst_tag=dst_tag, src_type=src_type, name=name,
                 seqs=seqs, ann_file=ann_file,
                 device=device, img_size=args.img_size,
                 print_every=args.print_every,

@@ -27,27 +27,30 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-ROOT       = Path(__file__).parent.parent
-EVAL_BINS  = Path("F:/GitHub/99-CellTracktor/EvaluationSoftware/Win")
+ROOT           = Path(__file__).parent.parent
+EVAL_BINS      = Path("F:/GitHub/99-CellTracktor/EvaluationSoftware/Win")
+DEEP_CSTQ_OUT  = Path("F:/GitHub/Deep_CSTQ_Datasets/src/output")
 sys.path.insert(0, str(ROOT / "src"))
 
 from ai_cstq.models import build_model
 from ai_cstq.util.ctc_io import predictions_to_ctc, run_ctc_eval
 
-# Dataset registry: key -> (dst_tag, full_name)
+# Dataset registry: key -> (dst_tag, full_name, test_src)
+#   test_src="local"  : ROOT/data/{dst_tag}/CTC/test/01/
+#   test_src="deep"   : DEEP_CSTQ_OUT/{ctc_name}/test/01/  (clean continuous GT)
 DATASETS_ORDER = [
-    ("huh7",  "ctc-huh7",  "Fluo-C2DL-Huh7"),
-    ("dhela", "ctc-dhela", "DIC-C2DH-HeLa"),
-    ("gowt1", "ctc-gowt1", "Fluo-N2DH-GOWT1"),
-    ("sim",   "ctc-sim",   "Fluo-N2DH-SIM+"),
-    ("u373",  "ctc-u373",  "PhC-C2DH-U373"),
-    ("psc",   "ctc-psc",   "PhC-C2DL-PSC"),
+    ("huh7",  "ctc-huh7",  "Fluo-C2DL-Huh7",  "deep",  "Fluo-C2DL-Huh7"),
+    ("dhela", "ctc-dhela", "DIC-C2DH-HeLa",   "local", None),
+    ("gowt1", "ctc-gowt1", "Fluo-N2DH-GOWT1", "deep",  "Fluo-N2DH-GOWT1"),
+    ("sim",   "ctc-sim",   "Fluo-N2DH-SIM+",  "local", None),
+    ("u373",  "ctc-u373",  "PhC-C2DH-U373",   "deep",  "PhC-C2DH-U373"),
+    ("psc",   "ctc-psc",   "PhC-C2DL-PSC",    "local", None),
 ]
 
-IMG_SIZE   = 256     # must match training
+IMG_SIZE    = 256     # must match training
 IN_CHANNELS = 3
-SEQ        = "01"
-NUM_DIGITS = 3
+SEQ         = "01"
+NUM_DIGITS  = 3
 
 
 # ---------------------------------------------------------------------------
@@ -78,11 +81,19 @@ MAX_TRACK_QUERIES = 20   # cap to model's num_queries to avoid explosion
 
 
 @torch.no_grad()
-def run_inference(model, frame_files, device, conf_threshold):
+def run_inference(model, frame_files, device, conf_threshold, gt_tra_dir=None):
     target_size = (IMG_SIZE, IMG_SIZE)
     from PIL import Image as PILImage
     sample = np.array(PILImage.open(str(frame_files[0])))
     img_hw = sample.shape[:2]
+
+    # Use GT mask size when it differs from image size (avoids TRAMeasure incompatible-size error)
+    if gt_tra_dir is not None:
+        gt_masks = sorted(Path(gt_tra_dir).glob("man_track???.tif"))
+        if gt_masks:
+            gt_sample = np.array(PILImage.open(str(gt_masks[0])))
+            if gt_sample.shape[:2] != img_hw:
+                img_hw = gt_sample.shape[:2]
 
     frames_t = [load_frame(f, target_size, IN_CHANNELS).to(device)
                 for f in frame_files]
@@ -163,7 +174,7 @@ def run_inference(model, frame_files, device, conf_threshold):
 def parse_args():
     p = argparse.ArgumentParser("CTC TRA/SEG/DET evaluation")
     p.add_argument("--datasets", nargs="+",
-                   default=[k for k, _, _ in DATASETS_ORDER],
+                   default=[row[0] for row in DATASETS_ORDER],
                    help="Dataset keys to evaluate")
     p.add_argument("--conf_threshold", type=float, default=0.3)
     p.add_argument("--device", default="auto")
@@ -190,12 +201,12 @@ def main():
 
     rows = []
 
-    for key, dst_tag, name in DATASETS_ORDER:
+    for key, dst_tag, name, test_src, ctc_name in DATASETS_ORDER:
         if key not in args.datasets:
             continue
 
         print(f"{'='*68}")
-        print(f"  [{name}]  ({dst_tag})")
+        print(f"  [{name}]  ({dst_tag})  [GT源: {test_src}]")
         print(f"{'='*68}")
 
         ckpt_path = ROOT / "results" / dst_tag / f"checkpoint_epoch{args.ckpt_epoch}.pth"
@@ -217,8 +228,19 @@ def main():
         print(f"  Epoch {ckpt.get('epoch', '?')}  "
               f"训练 loss={ckpt.get('avg_loss', 0):.3f}")
 
-        # ---- Test sequence ----
-        test_seq_dir = ROOT / "data" / dst_tag / "CTC" / "test" / SEQ
+        # ---- Test sequence (local copy or Deep_CSTQ_Datasets) ----
+        if test_src == "deep":
+            test_parent = DEEP_CSTQ_OUT / ctc_name / "test"
+            # Sequence numbers vary (e.g., 37-40); pick the first raw-image dir
+            seq_candidates = sorted(
+                d.name for d in test_parent.iterdir()
+                if d.is_dir() and not d.name.endswith(("_GT", "_RES"))
+            ) if test_parent.exists() else []
+            seq = seq_candidates[0] if seq_candidates else SEQ
+        else:
+            test_parent = ROOT / "data" / dst_tag / "CTC" / "test"
+            seq = SEQ
+        test_seq_dir = test_parent / seq
         frame_files  = sorted(test_seq_dir.glob("t???.tif"))
         if not frame_files:
             print(f"  [跳过] 未找到测试帧: {test_seq_dir}")
@@ -229,11 +251,13 @@ def main():
         print(f"  测试帧: {len(frame_files)} 帧  ({test_seq_dir})")
 
         # ---- Inference ----
+        gt_tra_dir = test_parent / f"{seq}_GT" / "TRA"
         print("  推理中 ...")
         try:
             t0 = time.perf_counter()
             all_outputs, img_hw = run_inference(
-                model, frame_files, device, args.conf_threshold)
+                model, frame_files, device, args.conf_threshold,
+                gt_tra_dir=str(gt_tra_dir) if gt_tra_dir.exists() else None)
             dt = time.perf_counter() - t0
             print(f"  推理完成，耗时 {dt:.1f}s")
         except Exception:
@@ -245,8 +269,8 @@ def main():
             continue
 
         # ---- Write RES ----
-        parent_dir = ROOT / "data" / dst_tag / "CTC" / "test"
-        res_dir    = parent_dir / f"{SEQ}_RES"
+        parent_dir = test_parent
+        res_dir    = parent_dir / f"{seq}_RES"
         res_dir.mkdir(parents=True, exist_ok=True)
         predictions_to_ctc(
             all_outputs=all_outputs,
@@ -263,7 +287,7 @@ def main():
         print("  运行 CTC 评测 ...")
         scores = run_ctc_eval(
             parent_dir=str(parent_dir),
-            sequence=SEQ,
+            sequence=seq,
             eval_binary_dir=str(EVAL_BINS),
             num_digits=NUM_DIGITS,
             metrics=["TRA", "SEG", "DET"],

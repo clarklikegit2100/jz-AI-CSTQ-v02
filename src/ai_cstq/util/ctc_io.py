@@ -158,7 +158,8 @@ def predictions_to_ctc(
                     t_start, _, parent = tracks[tid]
                     tracks[tid] = (t_start, t, parent)
 
-                # Rasterise mask
+                # Rasterise mask; fall back to box when mask is all-zero
+                mask_filled = False
                 if "pred_masks" in out:
                     pred_mask_i = out["pred_masks"][0, qi]   # (H_m, W_m) logits
                     import torch.nn.functional as F
@@ -167,36 +168,85 @@ def predictions_to_ctc(
                         size=(H, W), mode="bilinear", align_corners=False
                     )[0, 0]
                     mask_bin = (mask_bin.sigmoid() > mask_threshold).cpu().numpy()
-                    # Assign track_id to mask pixels (later ids overwrite earlier if overlapping)
-                    frame_mask[mask_bin] = tid
-                else:
-                    # Fallback: draw box
+                    if mask_bin.any():
+                        frame_mask[mask_bin] = tid
+                        mask_filled = True
+                if not mask_filled:
+                    # Box fallback (mask empty or no pred_masks)
                     cx, cy, bw, bh = boxes[qi, :4].cpu().tolist()
                     x1 = max(0, int((cx - bw / 2) * W))
                     y1 = max(0, int((cy - bh / 2) * H))
                     x2 = min(W, int((cx + bw / 2) * W))
                     y2 = min(H, int((cy + bh / 2) * H))
-                    frame_mask[y1:y2, x1:x2] = tid
+                    if x2 > x1 and y2 > y1:
+                        frame_mask[y1:y2, x1:x2] = tid
 
         # Write mask tif
         mask_path = os.path.join(out_dir, f"mask{t:03d}.tif")
         write_ctc_mask(mask_path, frame_mask)
 
-    # Rebuild tracking table from actual mask pixels to ensure consistency
-    # (avoids TRAMeasure error when a track_id in the table has no mask pixels)
+    # Rebuild tracking table from actual mask pixels.
+    # CTC requires each track to appear in EVERY frame from start to end.
+    # Split intermittent tracks into consecutive segments; rewrite mask pixels
+    # for non-first segments so res_track.txt IDs match mask pixel values.
     mask_files = sorted(Path(out_dir).glob("mask???.tif"))
-    verified_tracks: Dict[int, Tuple[int, int, int]] = {}
+    masks_by_frame: Dict[int, np.ndarray] = {}
+    tid_frames: Dict[int, List[int]] = {}
     for mf in mask_files:
         t_frame = int(mf.stem.replace("mask", ""))
         m = read_ctc_mask(str(mf))
+        masks_by_frame[t_frame] = m
         for tid in np.unique(m):
             if tid == 0:
                 continue
-            if tid not in verified_tracks:
-                verified_tracks[tid] = (t_frame, t_frame, 0)
+            tid_frames.setdefault(tid, []).append(t_frame)
+
+    max_id = max(tid_frames.keys(), default=0)
+    next_seg_id = max_id + 1
+    # remap[(old_tid, t_frame)] = new_tid  for frames needing pixel rewrite
+    remap: Dict[Tuple[int, int], int] = {}
+    verified_tracks: Dict[int, Tuple[int, int, int]] = {}
+
+    for tid, frames in tid_frames.items():
+        frames = sorted(set(frames))
+        # Split into consecutive segments
+        segments: List[Tuple[int, int]] = []
+        seg_start = frames[0]
+        prev = frames[0]
+        for f in frames[1:]:
+            if f == prev + 1:
+                prev = f
             else:
-                t_s, _, par = verified_tracks[tid]
-                verified_tracks[tid] = (t_s, t_frame, par)
+                segments.append((seg_start, prev))
+                seg_start = f
+                prev = f
+        segments.append((seg_start, prev))
+
+        for i, (s, e) in enumerate(segments):
+            if i == 0:
+                new_tid = tid  # first segment keeps original ID
+            else:
+                new_tid = next_seg_id
+                next_seg_id += 1
+                for f in range(s, e + 1):
+                    remap[(tid, f)] = new_tid
+            verified_tracks[new_tid] = (s, e, 0)
+
+    # Rewrite mask pixels where IDs were reassigned
+    if remap:
+        dirty_frames = set(f for (_, f) in remap)
+        for t_frame in dirty_frames:
+            m = masks_by_frame[t_frame]
+            changed = False
+            for (old_tid, tf), new_tid in remap.items():
+                if tf == t_frame:
+                    mask_pixels = m == old_tid
+                    if mask_pixels.any():
+                        m[mask_pixels] = new_tid
+                        changed = True
+            if changed:
+                mf_path = os.path.join(out_dir, f"mask{t_frame:03d}.tif")
+                write_ctc_mask(mf_path, m)
 
     # Write res_track.txt (CTC evaluation expects this name in RES dir)
     track_path = os.path.join(out_dir, "res_track.txt")
