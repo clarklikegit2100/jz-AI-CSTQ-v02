@@ -52,3 +52,4 @@ Thumbs.db
 # Temp scripts
 scripts/_inspect_ctc.py
 scripts/_verify_data.py
+.claude/scheduled_tasks.lock
