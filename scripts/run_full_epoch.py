@@ -54,7 +54,7 @@ DATASETS = {
     "gowt1": ("Fluo-N2DH-GOWT1", "ctc-gowt1", "Fluo-N2DH-GOWT1", 16, "deep"),  # 16×91f≈1456 batches ~19min
 }
 
-DATASET_ORDER = ["huh7", "dhela", "gowt1", "sim", "u373", "psc"]
+DATASET_ORDER = ["huh7", "psc", "u373", "gowt1", "dhela", "sim"]  # small→large by train samples
 
 # Tiny BSGM config (fast on CPU/GPU, proves the pipeline works)
 BSGM_CFG = dict(
@@ -141,7 +141,8 @@ def ensure_coco(src_tag: str, dst_tag: str, src_type: str, seqs: list, regen: bo
 
 def run_one_epoch(src_tag: str, dst_tag: str, src_type: str, name: str,
                   seqs: list, ann_file: Path, device: torch.device,
-                  img_size: int, print_every: int) -> dict:
+                  img_size: int, print_every: int,
+                  model=None, optimizer=None, criterion=None) -> dict:
     from ai_cstq.datasets.ctc_coco import CTCCocoDataset, collate_fn
     from ai_cstq.models import build_model
     from ai_cstq.models.criterion import build_criterion
@@ -167,11 +168,14 @@ def run_one_epoch(src_tag: str, dst_tag: str, src_type: str, name: str,
                         num_workers=2, collate_fn=collate_fn,
                         pin_memory=(device.type == "cuda"))
 
-    model = build_model(BSGM_CFG).to(device)
-    criterion = build_criterion(LOSS_CFG).to(device)
-    optimizer = build_optimizer(
-        model, {"lr": 1e-4, "lr_backbone": 1e-5, "weight_decay": 1e-4}
-    )
+    if model is None:
+        model = build_model(BSGM_CFG).to(device)
+    if criterion is None:
+        criterion = build_criterion(LOSS_CFG).to(device)
+    if optimizer is None:
+        optimizer = build_optimizer(
+            model, {"lr": 1e-4, "lr_backbone": 1e-5, "weight_decay": 1e-4}
+        )
 
     model.train()
 
@@ -244,7 +248,9 @@ def run_one_epoch(src_tag: str, dst_tag: str, src_type: str, name: str,
         "avg_loss":    avg_loss_final,
         "avg_ms":      avg_ms_final,
         "total_min":   t_total / 60,
-        "model_state": {k: v.cpu() for k, v in model.state_dict().items()},
+        "model":       model,
+        "optimizer":   optimizer,
+        "criterion":   criterion,
     }
 
 
@@ -368,6 +374,8 @@ def parse_args():
                    help="Print progress every N batches")
     p.add_argument("--regen_coco",  action="store_true",
                    help="Force COCO annotation regeneration")
+    p.add_argument("--epochs",      type=int, default=1,
+                   help="Number of epochs to train per dataset")
     return p.parse_args()
 
 
@@ -388,13 +396,17 @@ def main():
 
     print()
     print("=" * 72)
-    print("  完整数据集训练（一个 Epoch） — jz-AI-CSTQ-v02")
+    print(f"  完整数据集训练（{args.epochs} Epoch）— jz-AI-CSTQ-v02")
     print("=" * 72)
     print(f"  设备: {device}  |  尺寸: {args.img_size}×{args.img_size}  "
-          f"|  数据源: 99-CellTracktor")
+          f"|  Epochs: {args.epochs}")
     if device.type == "cuda":
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
     print()
+
+    from ai_cstq.models import build_model
+    from ai_cstq.models.criterion import build_criterion
+    from ai_cstq.engine import build_optimizer
 
     all_results = []
     t_grand_start = time.perf_counter()
@@ -402,7 +414,7 @@ def main():
     for key in args.datasets:
         src_tag, dst_tag, name, max_seqs, src_type = DATASETS[key]
         print(f"{'='*72}")
-        print(f"  [{name}]  ({dst_tag})  [源: {src_type}]")
+        print(f"  [{name}]  ({dst_tag})  [源: {src_type}]  [{args.epochs} epochs]")
         print(f"{'='*72}")
 
         try:
@@ -412,31 +424,70 @@ def main():
 
             ann_file = ensure_coco(src_tag, dst_tag, src_type, seqs, args.regen_coco)
 
-            result = run_one_epoch(
-                src_tag=src_tag, dst_tag=dst_tag, src_type=src_type, name=name,
-                seqs=seqs, ann_file=ann_file,
-                device=device, img_size=args.img_size,
-                print_every=args.print_every,
-            )
-            all_results.append(result)
-            print(f"\n  [{name}] Epoch 完成")
-            print(f"    平均损失: {result['avg_loss']:.3f}  "
-                  f"平均批次: {result['avg_ms']:.0f}ms  "
-                  f"总耗时: {result['total_min']:.1f} min  "
-                  f"错误批次: {result['n_err']}")
-
-            # Save checkpoint
-            ckpt_dir = ROOT / "results" / dst_tag
+            ckpt_dir  = ROOT / "results" / dst_tag
             ckpt_dir.mkdir(parents=True, exist_ok=True)
-            ckpt_path = ckpt_dir / "checkpoint_epoch1.pth"
-            torch.save({
-                "model_state": result["model_state"],
-                "cfg": BSGM_CFG,
-                "epoch": 1,
-                "avg_loss": result["avg_loss"],
-                "dataset": name,
-            }, ckpt_path)
-            print(f"    Checkpoint 已保存: {ckpt_path}")
+
+            # Determine starting epoch (resume from highest existing checkpoint)
+            existing = sorted(ckpt_dir.glob("checkpoint_epoch*.pth"),
+                              key=lambda p: int(p.stem.replace("checkpoint_epoch", "")))
+            start_epoch = 1
+            model = criterion = optimizer = None
+            if existing:
+                latest = existing[-1]
+                ep_num = int(latest.stem.replace("checkpoint_epoch", ""))
+                if ep_num >= args.epochs:
+                    print(f"    已有 epoch{ep_num} checkpoint，跳过（目标 {args.epochs} epoch）")
+                    all_results.append({"name": name, "skipped": True, "epoch": ep_num})
+                    print()
+                    continue
+                print(f"    从 checkpoint 恢复: {latest.name}  (epoch {ep_num})")
+                ckpt = torch.load(latest, map_location="cpu")
+                model = build_model(BSGM_CFG).to(device)
+                model.load_state_dict(ckpt["model_state"])
+                criterion = build_criterion(LOSS_CFG).to(device)
+                optimizer = build_optimizer(
+                    model, {"lr": 1e-4, "lr_backbone": 1e-5, "weight_decay": 1e-4}
+                )
+                if "optimizer_state" in ckpt:
+                    optimizer.load_state_dict(ckpt["optimizer_state"])
+                start_epoch = ep_num + 1
+
+            last_result = None
+            for epoch in range(start_epoch, args.epochs + 1):
+                print(f"\n  --- Epoch {epoch}/{args.epochs} ---")
+                result = run_one_epoch(
+                    src_tag=src_tag, dst_tag=dst_tag, src_type=src_type, name=name,
+                    seqs=seqs, ann_file=ann_file,
+                    device=device, img_size=args.img_size,
+                    print_every=args.print_every,
+                    model=model, optimizer=optimizer, criterion=criterion,
+                )
+                model     = result["model"]
+                optimizer = result["optimizer"]
+                criterion = result["criterion"]
+                last_result = result
+
+                print(f"  [{name}] Epoch {epoch} 完成  "
+                      f"loss={result['avg_loss']:.3f}  "
+                      f"{result['avg_ms']:.0f}ms/batch  "
+                      f"{result['total_min']:.1f}min")
+
+                # Save checkpoint every epoch
+                ckpt_path = ckpt_dir / f"checkpoint_epoch{epoch}.pth"
+                torch.save({
+                    "model_state":     {k: v.cpu() for k, v in model.state_dict().items()},
+                    "optimizer_state": optimizer.state_dict(),
+                    "cfg":             BSGM_CFG,
+                    "epoch":           epoch,
+                    "avg_loss":        result["avg_loss"],
+                    "dataset":         name,
+                }, ckpt_path)
+                print(f"  CHECKPOINT_READY: {dst_tag}  epoch{epoch}  "
+                      f"{ckpt_path.stat().st_size // 1024 // 1024}MB")
+
+            if last_result:
+                all_results.append({**last_result, "epoch": args.epochs})
+
         except Exception:
             print(f"\n  [{name}] 失败:")
             traceback.print_exc()
@@ -455,6 +506,8 @@ def main():
     for r in all_results:
         if r.get("failed"):
             print(f"  {r['name']:25s} {'FAILED':>7s}")
+        elif r.get("skipped"):
+            print(f"  {r['name']:25s} {'SKIPPED (ep'+str(r['epoch'])+')':>7s}")
         else:
             print(f"  {r['name']:25s} {r['n_samples']:>7d} "
                   f"{r['avg_loss']:>10.3f} {r['avg_ms']:>9.0f} "
