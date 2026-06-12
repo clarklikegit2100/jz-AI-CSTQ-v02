@@ -109,15 +109,17 @@ class SetCriterion(nn.Module):
         logits = outputs["pred_logits"]                    # (B, N, C+1)
         B, N, C1 = logits.shape
 
-        # Build targets tensor
-        tgt_cls = torch.zeros(B, N, dtype=torch.long, device=logits.device)
+        # One-hot focal target. Default = background (all zeros => channel-0 cell
+        # target is 0). ONLY matched queries are marked as cells (channel-0 = 1).
+        # Unmatched queries stay background so no-object supervision drives their
+        # cell score down. Previously tgt_cls was zero-initialised and the cell
+        # label is also 0, so EVERY query (matched or not) got cell-target=1,
+        # collapsing the classification head to "always cell" regardless of
+        # num_queries.
+        tgt_one_hot = torch.zeros_like(logits)
         for b, (src_idx, tgt_idx) in enumerate(indices):
             if len(src_idx):
-                tgt_cls[b, src_idx] = targets[b]["labels"][tgt_idx]
-
-        # One-hot for focal loss: positive class = 0 (cell), background = 1
-        tgt_one_hot = torch.zeros_like(logits)
-        tgt_one_hot[tgt_cls == 0, 0] = 1.0  # cell class
+                tgt_one_hot[b, src_idx, 0] = 1.0  # matched cell only
 
         loss = sigmoid_focal_loss(logits, tgt_one_hot, num_cells,
                                   self.focal_alpha, self.focal_gamma)

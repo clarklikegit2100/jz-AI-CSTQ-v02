@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import sys
+import os
 import time
 import traceback
 from pathlib import Path
@@ -28,8 +29,10 @@ import torch
 import torch.nn.functional as F
 
 ROOT           = Path(__file__).parent.parent
-EVAL_BINS      = Path("F:/GitHub/99-CellTracktor/EvaluationSoftware/Win")
-DEEP_CSTQ_OUT  = Path("F:/GitHub/Deep_CSTQ_Datasets/src/output")
+# Env-overridable for cloud (Linux). On Linux set CTC_EVAL_BINS to the Linux
+# binaries dir (EvaluationSoftware/Linux). Defaults keep local Windows behaviour.
+EVAL_BINS      = Path(os.environ.get("CTC_EVAL_BINS", "F:/GitHub/99-CellTracktor/EvaluationSoftware/Win"))
+DEEP_CSTQ_OUT  = Path(os.environ.get("DEEP_CSTQ_DATA", "F:/GitHub/Deep_CSTQ_Datasets/src/output"))
 sys.path.insert(0, str(ROOT / "src"))
 
 from ai_cstq.models import build_model
@@ -77,11 +80,12 @@ def load_frame(path: Path, target_size, in_channels: int) -> torch.Tensor:
 # Inference
 # ---------------------------------------------------------------------------
 
-MAX_TRACK_QUERIES = 20   # cap to model's num_queries to avoid explosion
+MAX_TRACK_QUERIES = 20   # default cap; override with --max_track_queries
 
 
 @torch.no_grad()
-def run_inference(model, frame_files, device, conf_threshold, gt_tra_dir=None):
+def run_inference(model, frame_files, device, conf_threshold, gt_tra_dir=None,
+                  max_track_queries=MAX_TRACK_QUERIES):
     target_size = (IMG_SIZE, IMG_SIZE)
     from PIL import Image as PILImage
     sample = np.array(PILImage.open(str(frame_files[0])))
@@ -145,7 +149,7 @@ def run_inference(model, frame_files, device, conf_threshold, gt_tra_dir=None):
             # Sort kept by score descending, cap
             kept_scores = scores[kept]
             order = kept_scores.argsort(descending=True)
-            kept = kept[order[:MAX_TRACK_QUERIES]]
+            kept = kept[order[:max_track_queries]]
 
             track_hs    = out["hs_embed"][:, kept, :]
             track_boxes = out["pred_boxes"][:, kept, :4]
@@ -180,6 +184,11 @@ def parse_args():
     p.add_argument("--device", default="auto")
     p.add_argument("--ckpt_epoch", type=int, default=1,
                    help="Checkpoint epoch to load")
+    p.add_argument("--ckpt_dir", default=None,
+                   help="Override results subdir holding checkpoints "
+                        "(e.g. ctc-huh7-fixed). Defaults to each dataset's dst_tag.")
+    p.add_argument("--max_track_queries", type=int, default=MAX_TRACK_QUERIES,
+                   help="Cap on track queries propagated per frame (raise for high num_queries models)")
     return p.parse_args()
 
 
@@ -209,7 +218,8 @@ def main():
         print(f"  [{name}]  ({dst_tag})  [GT源: {test_src}]")
         print(f"{'='*68}")
 
-        ckpt_path = ROOT / "results" / dst_tag / f"checkpoint_epoch{args.ckpt_epoch}.pth"
+        ckpt_subdir = args.ckpt_dir if args.ckpt_dir else dst_tag
+        ckpt_path = ROOT / "results" / ckpt_subdir / f"checkpoint_epoch{args.ckpt_epoch}.pth"
         if not ckpt_path.exists():
             print(f"  [跳过] Checkpoint 不存在: {ckpt_path}")
             print(f"         先运行: python scripts/run_full_epoch.py --datasets {key}")
@@ -257,7 +267,8 @@ def main():
             t0 = time.perf_counter()
             all_outputs, img_hw = run_inference(
                 model, frame_files, device, args.conf_threshold,
-                gt_tra_dir=str(gt_tra_dir) if gt_tra_dir.exists() else None)
+                gt_tra_dir=str(gt_tra_dir) if gt_tra_dir.exists() else None,
+                max_track_queries=args.max_track_queries)
             dt = time.perf_counter() - t0
             print(f"  推理完成，耗时 {dt:.1f}s")
         except Exception:

@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
 import traceback
@@ -32,8 +33,10 @@ from pathlib import Path
 import torch
 
 ROOT          = Path(__file__).parent.parent
-SRC           = Path("F:/GitHub/99-CellTracktor/code-ubu2004/data")
-DEEP_CSTQ_SRC = Path("F:/GitHub/Deep_CSTQ_Datasets/src/output")
+# Data roots are env-overridable so the same code runs on cloud (Linux) and local
+# (Windows). Defaults keep the original local Windows behaviour unchanged.
+SRC           = Path(os.environ.get("CTRACKTOR_DATA", "F:/GitHub/99-CellTracktor/code-ubu2004/data"))
+DEEP_CSTQ_SRC = Path(os.environ.get("DEEP_CSTQ_DATA", "F:/GitHub/Deep_CSTQ_Datasets/src/output"))
 DST           = ROOT / "data"
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
