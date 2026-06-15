@@ -31,19 +31,73 @@ What must be on the remote: the `criterion.py` fix, the env-var path overrides i
 
 ## 1. Pick the pod
 
+### Option A — RTX 5090 (recommended, cheapest total, no network volume)
+
+| Item | Value |
+|---|---|
+| GPU | **RTX 5090 (32 GB, $0.99/hr)** — fastest, cheapest total cost |
+| Template | RunPod PyTorch 2.x (CUDA 12.8) |
+| Storage | Container disk only (50 GB) — no network volume needed |
+| Total cost | ~$4–8 for 24 epochs (~4–8 h) |
+
+**Because the 5090 has no network volume**, use the auto-upload script (`scripts/cloud_train_huh7_5090.sh`)
+which pushes checkpoints to HuggingFace Hub and auto-stops the pod when done (§ Option A workflow below).
+
+### Option B — RTX 4090 / L40S / A100 (network volume, manual workflow)
+
 | Item | Recommended |
 |---|---|
-| GPU | **RTX 4090 (24 GB)** — best price/perf. A40 / A100 40 GB also fine. Minimum 16 GB (RTX A4000). |
-| Template | **RunPod PyTorch 2.x** (CUDA 12.x) — ships Python + CUDA toolkit |
+| GPU | RTX 4090 (24 GB, $0.69/hr) · L40S (48 GB, $0.86/hr) · A100 40 GB |
+| Template | RunPod PyTorch 2.x (CUDA 12.x) |
 | Disk | Container 20 GB + **Volume 30 GB** (mounted at `/workspace`, persists across restarts) |
-| Ports | 8888 (Jupyter) optional |
 
-Create the pod with a **Network Volume** mounted at `/workspace` so your data and
+Create the pod with a **Network Volume** mounted at `/workspace` so data and
 checkpoints survive a pod stop/restart.
 
 ---
 
-## 2. What to upload
+## 1b. Option A workflow (RTX 5090 — auto-upload + auto-stop)
+
+### Step 1: Set Environment Variables in RunPod pod settings (before starting)
+
+| Variable | Value |
+|---|---|
+| `HF_TOKEN` | Your HuggingFace write token (huggingface.co/settings/tokens) |
+| `HF_REPO` | e.g. `yourname/bsgm-huh7` (will be created automatically) |
+| `RUNPOD_API_KEY` | RunPod API key (runpod.io → User Settings → API Keys) |
+| `DEEP_CSTQ_DATA` | `/workspace/data/Deep_CSTQ_Datasets/src/output` |
+
+### Step 2: Upload data to the pod (one-time)
+
+```bash
+# On local (install runpodctl first):
+runpodctl send "F:/GitHub/Deep_CSTQ_Datasets/src/output/Fluo-C2DL-Huh7"
+# On pod:
+mkdir -p /workspace/data/Deep_CSTQ_Datasets/src/output
+runpodctl receive <code>
+mv Fluo-C2DL-Huh7 /workspace/data/Deep_CSTQ_Datasets/src/output/
+```
+
+### Step 3: Run the auto script (trains → uploads → stops pod)
+
+```bash
+cd /workspace
+git clone https://github.com/clarklikegit2100/jz-AI-CSTQ-v02.git
+bash jz-AI-CSTQ-v02/scripts/cloud_train_huh7_5090.sh
+```
+
+That's it. The script handles: pip install → train 24 epochs → upload last 3 checkpoints + log to HF Hub → stop pod.
+
+### Step 4: Download results locally
+
+```bash
+pip install huggingface_hub
+huggingface-cli download yourname/bsgm-huh7 --local-dir ./hf_results
+```
+
+---
+
+## 2. What to upload  (Option B — network volume pods only)
 
 | Source (local) | Size | Destination (pod) |
 |---|---|---|
