@@ -82,7 +82,7 @@ class DeformableEncoderLayer(nn.Module):
 
     def forward(self, src: Tensor, pos: Tensor, padding_mask: Optional[Tensor] = None) -> Tensor:
         q = k = src + pos
-        src2, _ = self.self_attn(q, k, src, key_padding_mask=padding_mask, need_weights=False)
+        src2, _ = self.self_attn(q, k, src, key_padding_mask=padding_mask)
         src = self.norm1(src + self.drop1(src2))
         src2 = self.lin2(self.drop2(F.relu(self.lin1(src))))
         src = self.norm2(src + self.drop3(src2))
