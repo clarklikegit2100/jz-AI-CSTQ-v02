@@ -201,6 +201,8 @@ def run_one_epoch(src_tag: str, dst_tag: str, src_type: str, name: str,
             pm = probe.get("pred_masks")
             mask_h = pm.shape[-2] if pm is not None else img_size // 4
             mask_w = pm.shape[-1] if pm is not None else img_size // 4
+            del probe, pm
+            torch.cuda.empty_cache()
             model.train()
 
         targets_r = []
