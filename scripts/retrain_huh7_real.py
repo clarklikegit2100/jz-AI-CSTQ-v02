@@ -39,6 +39,8 @@ def load_real_cfg():
     cfg = base
     cfg["with_div"] = False        # keep eval-compatible with evaluate_ctc.py
     cfg["focal_alpha"] = 0.5       # calibration fix (validated direction)
+    cfg["set_cost_class"] = 4.0    # matcher: balance class vs box cost (was 1.0)
+    cfg["cls_loss_coef"] = 8.0     # stronger cls gradient (was 4.0)
     return cfg
 
 

@@ -6,7 +6,8 @@ data_dir: F:/GitHub/jz-AI-CSTQ-v02/data
 output_dir: F:/GitHub/jz-AI-CSTQ-v02/results/ctchuh7_bsgm
 
 # HuH7 specific: larger images, more cells per frame
-target_size: [512, 512]
+# 256x256 used on cloud (standard MHA encoder OOMs at 512x512 — 136 GB attention)
+target_size: [256, 256]
 num_queries: 300
 batch_size: 1
 
@@ -23,3 +24,9 @@ graph_heads: 4
 
 # Uncertainty: slightly higher dropout for robustness
 bayesian_dropout: 0.1
+
+# Classification fix: increase matcher class cost + loss weight so cls head
+# dominates matching (default set_cost_class=1 is overwhelmed by bbox=5 when
+# boxes are uncertain early in training, causing noisy matches → collapsed cls).
+set_cost_class: 4.0
+cls_loss_coef: 8.0
