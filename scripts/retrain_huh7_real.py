@@ -1,20 +1,26 @@
 """Real-config Huh7 training (for a >=16GB cloud GPU, e.g. RunPod RTX 4090/A40).
 
 Trains the FULL v3.2 BSGM architecture that does NOT fit the local 6GB card:
-  target_size 512, enc_layers 4, dec_layers 6, dim_feedforward 1024,
+  target_size 256, enc_layers 4, dec_layers 6, dim_feedforward 1024,
   num_queries 300, num_feature_levels 4   (from cfgs/ctchuh7_bsgm.yaml)
-plus the two correctness fixes validated locally:
-  * criterion.loss_labels already fixed (only matched queries -> cell target)
-  * focal_alpha 0.25 -> 0.5  (up-weight the rare cell class; avoids under-confidence)
+plus correctness fixes:
+  * focal_alpha 0.25 -> 0.5  (up-weight the rare cell class)
+  * set_cost_class 1 -> 4    (matcher balances class vs box cost)
+  * cls_loss_coef 4 -> 8     (stronger classification gradient)
+
+Use --local for RTX 3050 / 6 GB: scales to img=128, nq=150, enc=2, dec=4, ff=512.
 
 Reuses run_full_epoch's proven full-Huh7 data pipeline (reads from $DEEP_CSTQ_DATA).
-AMP stays OFF: the matcher NaNs under autocast; a 24GB GPU fits fp32 comfortably.
+AMP stays OFF: the matcher NaNs under autocast.
 
-Checkpoints -> results/ctc-huh7-real/checkpoint_epoch{N}.pth
+Checkpoints -> results/ctc-huh7-real/checkpoint_epoch{N}.pth  (cloud)
+            -> results/ctc-huh7-local/checkpoint_epoch{N}.pth  (--local)
 
-Usage (on the pod, env jz-AI-CSTQ-v02 active, data uploaded):
-    export DEEP_CSTQ_DATA=/workspace/data/Deep_CSTQ_Datasets/src/output
+Usage:
+    # Cloud (>=16 GB GPU):
     python scripts/retrain_huh7_real.py --epochs 24 --lr_drop 20
+    # Local RTX 3050 (6 GB):
+    python scripts/retrain_huh7_real.py --local --epochs 24 --lr_drop 20
 """
 import os, sys, argparse
 from pathlib import Path
@@ -31,7 +37,7 @@ from ai_cstq.models.criterion import build_criterion
 from ai_cstq.engine import build_optimizer
 
 
-def load_real_cfg():
+def load_real_cfg(local: bool = False):
     p = ROOT / "cfgs" / "ctchuh7_bsgm.yaml"
     cfg = yaml.safe_load(open(p))
     base = yaml.safe_load(open(ROOT / "cfgs" / cfg.pop("base_config")))
@@ -41,6 +47,15 @@ def load_real_cfg():
     cfg["focal_alpha"] = 0.5       # calibration fix (validated direction)
     cfg["set_cost_class"] = 4.0    # matcher: balance class vs box cost (was 1.0)
     cfg["cls_loss_coef"] = 8.0     # stronger cls gradient (was 4.0)
+    if local:
+        # Scale down for 6 GB VRAM (RTX 3050): encoder N=1360 → 0.06 GB/layer
+        cfg["target_size"] = [128, 128]
+        cfg["num_queries"] = 150
+        cfg["enc_layers"] = 2
+        cfg["dec_layers"] = 4
+        cfg["dim_feedforward"] = 512
+        cfg["graph_topk"] = 10
+        cfg["mamba_d_state"] = 16
     return cfg
 
 
@@ -48,23 +63,27 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=24)
     ap.add_argument("--lr_drop", type=int, default=20)
+    ap.add_argument("--local", action="store_true",
+                    help="Scale model down for 6 GB local GPU (img=128, nq=150, enc=2, dec=4, ff=512)")
     args = ap.parse_args()
 
-    cfg = load_real_cfg()
+    cfg = load_real_cfg(local=args.local)
     img_size = int(cfg["target_size"][0])
 
     rfe._patch_coco_script()
     device = torch.device("cuda")
-    print(f"REAL config | img={img_size} nq={cfg['num_queries']} "
+    mode = "LOCAL" if args.local else "CLOUD"
+    print(f"{mode} config | img={img_size} nq={cfg['num_queries']} "
           f"enc={cfg['enc_layers']} dec={cfg['dec_layers']} ff={cfg['dim_feedforward']} "
-          f"focal_alpha={cfg['focal_alpha']} | epochs={args.epochs} lr_drop={args.lr_drop}")
+          f"focal_alpha={cfg['focal_alpha']} cls_coef={cfg['cls_loss_coef']} "
+          f"| epochs={args.epochs} lr_drop={args.lr_drop}")
     print(f"DEEP_CSTQ_DATA = {rfe.DEEP_CSTQ_SRC}")
 
     src_tag, dst_tag, name, max_seqs, src_type = rfe.DATASETS["huh7"]
     seqs = rfe.get_train_seqs(src_tag, src_type, max_seqs)
     ann_file = rfe.ensure_coco(src_tag, dst_tag, src_type, seqs, regen=False)
 
-    ckpt_dir = ROOT / "results" / "ctc-huh7-real"
+    ckpt_dir = ROOT / "results" / ("ctc-huh7-local" if args.local else "ctc-huh7-real")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     model = build_model(cfg).to(device)
