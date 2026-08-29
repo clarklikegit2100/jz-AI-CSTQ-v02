@@ -84,142 +84,8 @@ MAX_TRACK_QUERIES = 20   # default cap; override with --max_track_queries
 
 
 @torch.no_grad()
-def run_inference_iou_tracker(model, frame_files, device, conf_threshold,
-                               gt_tra_dir=None, iou_link_thresh=0.05, top_k=None):
-    """Detection-only inference + IoU Hungarian tracker post-processing.
-    No track queries are passed to the model — each frame is detected independently,
-    then detections are linked across frames via IoU-based Hungarian matching.
-    This avoids FP track query accumulation from imprecise low-res boxes.
-    """
-    from scipy.optimize import linear_sum_assignment
-    target_size = (IMG_SIZE, IMG_SIZE)
-    from PIL import Image as PILImage
-    sample = np.array(PILImage.open(str(frame_files[0])))
-    img_hw = sample.shape[:2]
-    if gt_tra_dir is not None:
-        gt_masks = sorted(Path(gt_tra_dir).glob("man_track???.tif"))
-        if gt_masks:
-            gt_sample = np.array(PILImage.open(str(gt_masks[0])))
-            if gt_sample.shape[:2] != img_hw:
-                img_hw = gt_sample.shape[:2]
-
-    frames_t = [load_frame(f, target_size, IN_CHANNELS).to(device) for f in frame_files]
-    T = len(frames_t)
-    model.eval()
-
-    # Pass 1: detect each frame independently (no track queries)
-    per_frame_dets = []   # list of {"boxes": (K,4), "scores": (K,), "out": dict}
-    for t_idx in range(T):
-        i_p, i_n = max(0, t_idx - 1), min(T - 1, t_idx + 1)
-        frames = [frames_t[i_p].unsqueeze(0),
-                  frames_t[t_idx].unsqueeze(0),
-                  frames_t[i_n].unsqueeze(0)]
-        out = model(frames)
-        scores = out["pred_logits"][0, :, 0].sigmoid()
-        keep   = scores > conf_threshold
-        kept   = keep.nonzero(as_tuple=True)[0]
-        kept_scores = scores[kept]
-        order = kept_scores.argsort(descending=True)
-        kept = kept[order]
-        if top_k is not None:
-            kept = kept[:top_k]
-        boxes = out["pred_boxes"][0, kept, :4].cpu()
-        per_frame_dets.append({
-            "boxes": boxes,
-            "scores": kept_scores[order].cpu(),
-            "kept_idx": kept.cpu(),
-            "out": {k: v.cpu() for k, v in out.items() if isinstance(v, torch.Tensor)},
-        })
-        print(f"    t={t_idx:03d}  检测到 {len(kept)} 个细胞  (det-only)")
-
-    # Pass 2: Hungarian IoU link across frames
-    def iou_matrix(boxes_a, boxes_b):
-        n, m = len(boxes_a), len(boxes_b)
-        if n == 0 or m == 0:
-            return np.zeros((n, m))
-        mat = np.zeros((n, m))
-        for i, ba in enumerate(boxes_a):
-            iou = _box_iou_single(ba, boxes_b)
-            mat[i] = iou.numpy()
-        return mat
-
-    next_tid = 1
-    active_boxes = None   # (K, 4) boxes from previous frame
-    active_tids  = []     # track IDs from previous frame
-
-    all_outputs = []
-    for t_idx, det in enumerate(per_frame_dets):
-        boxes   = det["boxes"]   # (K, 4)
-        kept_idx = det["kept_idx"]
-        out = det["out"]
-        n_det = len(boxes)
-
-        track_ids = torch.zeros(out["pred_logits"].shape[1], dtype=torch.long)
-
-        if t_idx == 0 or active_boxes is None or len(active_tids) == 0:
-            # First frame: assign fresh IDs
-            new_tids = list(range(next_tid, next_tid + n_det))
-            next_tid += n_det
-        else:
-            # Match current detections to previous active tracks via IoU
-            iou_mat = iou_matrix(boxes, active_boxes)   # (n_det, n_prev)
-            cost = 1.0 - iou_mat
-            row_ind, col_ind = linear_sum_assignment(cost)
-            new_tids = [0] * n_det
-            used_prev = set()
-            for r, c in zip(row_ind, col_ind):
-                if iou_mat[r, c] >= iou_link_thresh:
-                    new_tids[r] = active_tids[c]
-                    used_prev.add(c)
-            # Unmatched detections get new IDs
-            for i in range(n_det):
-                if new_tids[i] == 0:
-                    new_tids[i] = next_tid
-                    next_tid += 1
-
-        for qi_pos, qi in enumerate(kept_idx.tolist()):
-            track_ids[qi] = new_tids[qi_pos]
-
-        out["track_ids"] = track_ids
-        all_outputs.append(out)
-
-        active_boxes = boxes
-        active_tids  = new_tids
-
-    return all_outputs, img_hw
-
-
-def _box_iou_single(box_a: torch.Tensor, boxes_b: torch.Tensor) -> torch.Tensor:
-    """IoU of one cxcywh box vs many. Returns (N,) tensor."""
-    def to_xyxy(b):
-        x1 = b[..., 0] - b[..., 2] / 2
-        y1 = b[..., 1] - b[..., 3] / 2
-        x2 = b[..., 0] + b[..., 2] / 2
-        y2 = b[..., 1] + b[..., 3] / 2
-        return x1, y1, x2, y2
-    ax1, ay1, ax2, ay2 = to_xyxy(box_a)
-    bx1, by1, bx2, by2 = to_xyxy(boxes_b)
-    inter_w = (torch.min(ax2, bx2) - torch.max(ax1, bx1)).clamp(0)
-    inter_h = (torch.min(ay2, by2) - torch.max(ay1, by1)).clamp(0)
-    inter   = inter_w * inter_h
-    area_a  = (ax2 - ax1) * (ay2 - ay1)
-    area_b  = (bx2 - bx1) * (by2 - by1)
-    return inter / (area_a + area_b - inter).clamp(min=1e-6)
-
-
-@torch.no_grad()
 def run_inference(model, frame_files, device, conf_threshold, gt_tra_dir=None,
-                  max_track_queries=MAX_TRACK_QUERIES,
-                  track_threshold=None, new_det_iou_thresh=0.4):
-    """
-    track_threshold   : min score for an existing track to be propagated.
-                        Defaults to conf_threshold + 0.05 to kill low-conf FP tracks.
-    new_det_iou_thresh: suppress a new-detection query if its box overlaps an
-                        existing track box by more than this IoU (avoids double-counting).
-    """
-    if track_threshold is None:
-        track_threshold = min(conf_threshold + 0.05, 0.9)
-
+                  max_track_queries=MAX_TRACK_QUERIES):
     target_size = (IMG_SIZE, IMG_SIZE)
     from PIL import Image as PILImage
     sample = np.array(PILImage.open(str(frame_files[0])))
@@ -257,39 +123,30 @@ def run_inference(model, frame_files, device, conf_threshold, gt_tra_dir=None,
 
         logits = out["pred_logits"]           # (1, N, C+1)
         scores = logits[0, :, 0].sigmoid()
-        boxes  = out["pred_boxes"][0, :, :4]  # (N, 4) cxcywh normalised
+        keep   = scores > conf_threshold
 
         n_track = track_hs.shape[1] if track_hs is not None else 0
         track_ids = torch.zeros(logits.shape[1], dtype=torch.long, device=device)
 
-        # --- Track queries: propagate only if score >= track_threshold ---
-        active_track_boxes = []
+        # Propagate existing tracks
         for qi in range(n_track):
-            if scores[qi] >= track_threshold and qi in active:
+            if keep[qi] and qi in active:
                 track_ids[qi] = active[qi]
-                active_track_boxes.append(boxes[qi])
 
-        # --- New-detection queries: skip if overlapping an active track ---
-        track_box_tensor = (torch.stack(active_track_boxes)
-                            if active_track_boxes else None)
+        # Assign new IDs to new-object queries only
         for qi in range(n_track, logits.shape[1]):
-            if scores[qi] < conf_threshold:
-                continue
-            if track_box_tensor is not None:
-                iou = _box_iou_single(boxes[qi], track_box_tensor)
-                if iou.max().item() > new_det_iou_thresh:
-                    continue   # already covered by an active track
-            track_ids[qi] = next_tid
-            active[qi] = next_tid
-            next_tid += 1
+            if keep[qi]:
+                track_ids[qi] = next_tid
+                active[qi] = next_tid
+                next_tid += 1
 
         out["track_ids"] = track_ids
 
-        # Build next-frame track queries from ALL kept detections (track + new),
-        # capped at max_track_queries by score
-        keep = track_ids > 0
+        # Build next-frame track queries: only from kept detections,
+        # capped at MAX_TRACK_QUERIES (top by score to avoid explosion)
         kept = keep.nonzero(as_tuple=True)[0]
         if len(kept) > 0:
+            # Sort kept by score descending, cap
             kept_scores = scores[kept]
             order = kept_scores.argsort(descending=True)
             kept = kept[order[:max_track_queries]]
@@ -332,14 +189,6 @@ def parse_args():
                         "(e.g. ctc-huh7-fixed). Defaults to each dataset's dst_tag.")
     p.add_argument("--max_track_queries", type=int, default=MAX_TRACK_QUERIES,
                    help="Cap on track queries propagated per frame (raise for high num_queries models)")
-    p.add_argument("--track_threshold", type=float, default=None,
-                   help="Min score to keep propagating an existing track (default: conf+0.05)")
-    p.add_argument("--new_det_iou_thresh", type=float, default=0.4,
-                   help="Suppress new-detection query if IoU with any active track > this (avoids double-count)")
-    p.add_argument("--iou_tracker", action="store_true",
-                   help="Detection-only mode: no track queries; link frames with IoU Hungarian tracker")
-    p.add_argument("--iou_tracker_thresh", type=float, default=0.05,
-                   help="Min IoU to link a detection to an existing track (default 0.05)")
     return p.parse_args()
 
 
@@ -416,19 +265,10 @@ def main():
         print("  推理中 ...")
         try:
             t0 = time.perf_counter()
-            if args.iou_tracker:
-                all_outputs, img_hw = run_inference_iou_tracker(
-                    model, frame_files, device, args.conf_threshold,
-                    gt_tra_dir=str(gt_tra_dir) if gt_tra_dir.exists() else None,
-                    iou_link_thresh=args.iou_tracker_thresh,
-                    top_k=args.max_track_queries if args.max_track_queries != MAX_TRACK_QUERIES else None)
-            else:
-                all_outputs, img_hw = run_inference(
-                    model, frame_files, device, args.conf_threshold,
-                    gt_tra_dir=str(gt_tra_dir) if gt_tra_dir.exists() else None,
-                    max_track_queries=args.max_track_queries,
-                    track_threshold=args.track_threshold,
-                    new_det_iou_thresh=args.new_det_iou_thresh)
+            all_outputs, img_hw = run_inference(
+                model, frame_files, device, args.conf_threshold,
+                gt_tra_dir=str(gt_tra_dir) if gt_tra_dir.exists() else None,
+                max_track_queries=args.max_track_queries)
             dt = time.perf_counter() - t0
             print(f"  推理完成，耗时 {dt:.1f}s")
         except Exception:
