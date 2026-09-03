@@ -8,8 +8,10 @@ Usage:
 
 import argparse
 import os
+import random
 import sys
 
+import numpy as np
 import torch
 import yaml
 
@@ -50,6 +52,13 @@ def main():
     args = parse_args()
     cfg = load_config(args.config)
 
+    seed = int(cfg.get("seed", 42))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     if args.output_dir:
         cfg["output_dir"] = args.output_dir
     output_dir = cfg.get("output_dir", "results/default")
@@ -61,6 +70,7 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"Seed: {seed}")
     if device.type == "cuda":
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
 

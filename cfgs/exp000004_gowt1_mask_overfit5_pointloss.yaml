@@ -1,0 +1,57 @@
+base_config: base_bsgm.yaml
+
+# L0 diagnostic: does the point-sampled mask loss let the native mask head
+# memorise five GOWT1 frames?  Same data + protocol as
+# gowt1_map_st_seg_overfit5 (the run that failed with dice stuck at ~1.0),
+# only the mask supervision path changed.
+output_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000004-jz-AI-CSTQ-v02-20260902/03-Result/diagnostics/gowt1_mask_overfit5_pointloss
+dataset: ctcgowt1_exp000004_mask_overfit5
+seed: 42
+train_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+train_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+train_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+val_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+val_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+val_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+
+target_size: [256, 256]
+num_queries: 32
+train_max_samples: 5
+val_max_samples: 5
+batch_size: 1
+num_workers: 0
+epochs: 100
+# Freeze the (from-scratch) backbone only during the detection warmup, then let
+# it learn features the pixel decoder can localise masks from.
+warmup_epochs: 12
+# Detection-only for the first N epochs: let the box/class-driven Hungarian
+# matcher stabilise before any mask gradient, otherwise the matched target
+# masks thrash and the head collapses to all-background (dice locks at 1.0).
+mask_warmup_epochs: 12
+max_track_queries: 0
+use_amp: false
+save_checkpoint_every: 30
+lr: 0.0002
+lr_backbone: 0.0001          # from-scratch swin, 5-frame overfit — needs to move
+lr_drop: 90
+mask_lr_mult: 5.0
+clip_max_norm: 1.0
+
+# --- mask supervision (new) ---
+mask_num_points: 12544
+mask_oversample_ratio: 3.0
+mask_importance_sample_ratio: 0.75
+mask_gt_bbox_fraction: 0.5
+cost_mask_points: 3000
+mask_loss_type: bce
+
+# --- loss weights ---
+# dice + BCE on the foreground-enriched point set (Mask2Former recipe). BCE
+# anchors absolute probability so dice cannot oscillate all-fg <-> saturated
+# all-bg. set_cost_mask 0 keeps the early noisy mask logits out of matching.
+cls_loss_coef: 2.0
+bbox_loss_coef: 5.0
+giou_loss_coef: 2.0
+mask_loss_coef: 5.0
+dice_loss_coef: 5.0
+set_cost_mask: 0.0

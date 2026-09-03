@@ -1,0 +1,21 @@
+base_config: base_bsgm.yaml
+
+dataset: ctcu373_exp000004_fold_a_baseline
+seed: 42
+train_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000004-jz-AI-CSTQ-v02-20260902/03-Result/manifests/u373_fold_a_baseline_train.json
+train_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcu373_fold_a/COCO/train/img
+train_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcu373_fold_a/COCO/train/ignore
+val_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcu373_fold_a/COCO/annotations/val/anno.json
+val_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcu373_fold_a/COCO/val/img
+val_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcu373_fold_a/COCO/val/ignore
+output_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000004-jz-AI-CSTQ-v02-20260902/03-Result/formal/u373/fold_a/baseline
+
+target_size: [256, 256]
+num_queries: 32
+max_track_queries: 8
+batch_size: 1
+num_workers: 2
+epochs: 24
+warmup_epochs: 8
+use_amp: false
+save_checkpoint_every: 6

@@ -219,7 +219,12 @@ def main():
         print(f"{'='*68}")
 
         ckpt_subdir = args.ckpt_dir if args.ckpt_dir else dst_tag
-        ckpt_path = ROOT / "results" / ckpt_subdir / f"checkpoint_epoch{args.ckpt_epoch}.pth"
+        result_dir = ROOT / "results" / ckpt_subdir
+        ckpt_path = result_dir / f"checkpoint_epoch{args.ckpt_epoch}.pth"
+        if not ckpt_path.exists():
+            padded = result_dir / f"checkpoint_epoch{args.ckpt_epoch:04d}.pth"
+            if padded.exists():
+                ckpt_path = padded
         if not ckpt_path.exists():
             print(f"  [跳过] Checkpoint 不存在: {ckpt_path}")
             print(f"         先运行: python scripts/run_full_epoch.py --datasets {key}")
@@ -233,7 +238,10 @@ def main():
         ckpt = torch.load(ckpt_path, map_location="cpu")
         cfg  = ckpt.get("cfg", {})
         model = build_model(cfg).to(device)
-        model.load_state_dict(ckpt["model_state"], strict=True)
+        model_state = ckpt.get("model_state", ckpt.get("model"))
+        if model_state is None:
+            raise KeyError("checkpoint has neither 'model_state' nor 'model'")
+        model.load_state_dict(model_state, strict=True)
         model.eval()
         print(f"  Epoch {ckpt.get('epoch', '?')}  "
               f"训练 loss={ckpt.get('avg_loss', 0):.3f}")

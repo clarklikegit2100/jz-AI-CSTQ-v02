@@ -45,6 +45,7 @@ class HungarianMatcher(nn.Module):
         cost_mask: float = 1.0,
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
+        cost_mask_points: int = 3000,
     ):
         super().__init__()
         self.cost_class = cost_class
@@ -53,6 +54,7 @@ class HungarianMatcher(nn.Module):
         self.cost_mask = cost_mask
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
+        self.cost_mask_points = cost_mask_points
 
     @torch.no_grad()
     def forward(self, outputs: dict, targets: list) -> list:
@@ -108,20 +110,33 @@ class HungarianMatcher(nn.Module):
                 box_cxcywh_to_xyxy(tgt_boxes_4d),
             )  # (N, M)
 
-            # Mask cost (optional, fast pixel sampling)
+            # Mask cost — sample the same uniform-random point set for every
+            # prediction and target, matching how loss_masks supervises masks
+            # (Mask2Former). Avoids the resolution mismatch of a full downsample.
             cost_mask = 0.0
             if "pred_masks" in outputs and "masks" in targets[b]:
-                pred_masks = outputs["pred_masks"][b]   # (N, H_m, W_m)
-                tgt_masks = targets[b]["masks"].float() # (M, H, W)
-                # Downsample target masks to pred resolution
-                H_m, W_m = pred_masks.shape[-2:]
-                tgt_masks_small = F.interpolate(
-                    tgt_masks.unsqueeze(1), size=(H_m, W_m), mode="bilinear", align_corners=False
-                ).squeeze(1)  # (M, H_m, W_m)
-                # Binary focal mask cost
-                pred_flat = pred_masks.flatten(1)          # (N, H*W)
-                tgt_flat = tgt_masks_small.flatten(1)      # (M, H*W)
-                cost_mask = batch_sigmoid_focal_cost(pred_flat, tgt_flat)  # (N, M)
+                pred_masks = outputs["pred_masks"][b].unsqueeze(1)          # (N, 1, H_m, W_m)
+                tgt_masks = targets[b]["masks"].float().unsqueeze(1)        # (M, 1, H_t, W_t)
+                P = self.cost_mask_points
+                pc = torch.rand(1, P, 2, device=pred_masks.device)
+                pred_pts = _point_sample(
+                    pred_masks, pc.expand(pred_masks.shape[0], -1, -1)
+                ).squeeze(1)                                               # (N, P)
+                tgt_pts = _point_sample(
+                    tgt_masks, pc.expand(tgt_masks.shape[0], -1, -1)
+                ).squeeze(1)                                               # (M, P)
+                valid_flat = None
+                if "ignore_mask" in targets[b]:
+                    ign = targets[b]["ignore_mask"].float()[None, None]
+                    valid_flat = (_point_sample(ign, pc).squeeze() < 0.5)  # (P,)
+                cost_mask = batch_sigmoid_focal_cost(
+                    pred_pts, tgt_pts, valid_mask=valid_flat,
+                )  # (N, M)
+                # Invalid/empty instance masks must not influence assignment;
+                # their class and box annotations remain fully supervised.
+                if "mask_valid" in targets[b]:
+                    invalid = ~targets[b]["mask_valid"].bool()
+                    cost_mask[:, invalid] = 0
                 cost_mask = self.cost_mask * cost_mask
 
             # Total cost
@@ -188,13 +203,30 @@ def generalised_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
     return giou  # (N, M)
 
 
-def batch_sigmoid_focal_cost(pred: Tensor, tgt: Tensor) -> Tensor:
+def _point_sample(inp: Tensor, point_coords: Tensor, **kwargs) -> Tensor:
+    """Sample inp (N,C,H,W) at point_coords (N,P,2) in [0,1] -> (N,C,P)."""
+    add_dim = point_coords.dim() == 3
+    if add_dim:
+        point_coords = point_coords.unsqueeze(2)
+    out = F.grid_sample(inp, 2.0 * point_coords - 1.0, align_corners=False, **kwargs)
+    return out.squeeze(3) if add_dim else out
+
+
+def batch_sigmoid_focal_cost(
+    pred: Tensor, tgt: Tensor, valid_mask: Tensor = None,
+) -> Tensor:
     """
     Sigmoid focal cost between pred (N, L) and tgt (M, L).
     Returns (N, M).
     """
     prob = pred.sigmoid().unsqueeze(1)    # (N, 1, L)
     tgt_e = tgt.unsqueeze(0)             # (1, M, L)
-    pos_cost = -(tgt_e * torch.log(prob + 1e-8)).mean(-1)
-    neg_cost = -((1 - tgt_e) * torch.log(1 - prob + 1e-8)).mean(-1)
+    if valid_mask is None:
+        valid = 1.0
+        denom = pred.shape[-1]
+    else:
+        valid = valid_mask.to(dtype=pred.dtype).view(1, 1, -1)
+        denom = valid.sum().clamp(min=1.0)
+    pos_cost = -(tgt_e * torch.log(prob + 1e-8) * valid).sum(-1) / denom
+    neg_cost = -((1 - tgt_e) * torch.log(1 - prob + 1e-8) * valid).sum(-1) / denom
     return pos_cost + neg_cost           # (N, M)

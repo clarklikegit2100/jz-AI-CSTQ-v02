@@ -22,6 +22,29 @@ from torch.utils.data import DataLoader
 from .util.misc import MetricLogger, get_total_grad_norm, save_checkpoint
 
 
+@torch.no_grad()
+def _previous_frame_track_queries(
+    model: nn.Module, images: List[Tensor], max_track_queries: int,
+):
+    """Create detached track queries from a previous-centred temporal window."""
+    if max_track_queries <= 0 or len(images) < 2:
+        return None, None
+    previous_window = [images[0], images[0], images[1]]
+    previous = model(previous_window)
+    scores = previous["pred_logits"][..., 0].sigmoid()
+    count = min(max_track_queries, scores.shape[1])
+    topk = scores.topk(count, dim=1).indices
+    hidden = torch.gather(
+        previous["hs_embed"], 1,
+        topk.unsqueeze(-1).expand(-1, -1, previous["hs_embed"].shape[-1]),
+    )
+    boxes = torch.gather(
+        previous["pred_boxes"], 1,
+        topk.unsqueeze(-1).expand(-1, -1, previous["pred_boxes"].shape[-1]),
+    )
+    return hidden.detach(), boxes.detach()
+
+
 # ---------------------------------------------------------------------------
 # Training step
 # ---------------------------------------------------------------------------
@@ -37,6 +60,8 @@ def train_one_epoch(
     use_amp: bool = True,
     print_freq: int = 50,
     stage: str = "full",            # "warmup" | "track" | "full"
+    max_track_queries: int = 50,
+    max_steps: Optional[int] = None,
 ) -> Dict[str, float]:
     """
     Train for one epoch.
@@ -67,8 +92,14 @@ def train_one_epoch(
             if stage == "warmup":
                 outputs = model(images)
             else:
-                # TODO: extract track queries from targets if DN-track is used
-                outputs = model(images)
+                track_hs, track_boxes = _previous_frame_track_queries(
+                    model, images, max_track_queries,
+                )
+                outputs = model(
+                    images,
+                    track_query_hs_embeds=track_hs,
+                    track_query_boxes=track_boxes,
+                )
 
             losses = criterion(outputs, targets)
             loss = losses["loss_total"]
@@ -100,6 +131,9 @@ def train_one_epoch(
                 f"time: {elapsed:.1f}s"
             )
 
+        if max_steps is not None and batch_idx + 1 >= max_steps:
+            break
+
     return {k: v.global_avg for k, v in logger.meters.items()}
 
 
@@ -114,6 +148,7 @@ def evaluate(
     data_loader: DataLoader,
     device: torch.device,
     use_amp: bool = True,
+    max_steps: Optional[int] = None,
 ) -> Dict[str, float]:
     """Evaluate on validation set, compute average losses."""
     model.eval()
@@ -121,7 +156,7 @@ def evaluate(
 
     logger = MetricLogger()
 
-    for images, targets in data_loader:
+    for batch_idx, (images, targets) in enumerate(data_loader):
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) if isinstance(v, Tensor) else v
                     for k, v in t.items()} for t in targets]
@@ -131,6 +166,8 @@ def evaluate(
             losses = criterion(outputs, targets)
 
         logger.update(**{k: v.item() for k, v in losses.items()})
+        if max_steps is not None and batch_idx + 1 >= max_steps:
+            break
 
     return {k: v.global_avg for k, v in logger.meters.items()}
 
@@ -161,6 +198,10 @@ def train(
     use_amp = cfg.get("use_amp", True)
     max_norm = cfg.get("clip_max_norm", 0.1)
     save_every = cfg.get("save_checkpoint_every", 4)
+    max_track_queries = cfg.get("max_track_queries", 50)
+    max_train_steps = cfg.get("max_train_steps")
+    max_val_steps = cfg.get("max_val_steps")
+    mask_warmup_epochs = cfg.get("mask_warmup_epochs", 0)
 
     best_val_loss = float("inf")
 
@@ -177,19 +218,31 @@ def train(
             for p in model.backbone.parameters():
                 p.requires_grad_(True)
 
-        print(f"\n===== Epoch {epoch}/{total_epochs - 1}  stage={stage} =====")
+        criterion.mask_enabled = epoch >= mask_warmup_epochs
+        if hasattr(criterion, "module"):
+            criterion.module.mask_enabled = criterion.mask_enabled
+
+        print(f"\n===== Epoch {epoch}/{total_epochs - 1}  stage={stage}  "
+              f"mask={'on' if criterion.mask_enabled else 'warmup'} =====")
         train_stats = train_one_epoch(
             model, criterion, train_loader, optimizer, device,
             epoch, max_norm=max_norm, use_amp=use_amp, stage=stage,
+            max_track_queries=max_track_queries, max_steps=max_train_steps,
         )
 
-        val_stats = evaluate(model, criterion, val_loader, device, use_amp=use_amp)
+        val_stats = evaluate(
+            model, criterion, val_loader, device, use_amp=use_amp,
+            max_steps=max_val_steps,
+        )
 
         lr_scheduler.step()
 
         # Logging
-        print(f"Train: {' | '.join(f'{k}: {v:.4f}' for k, v in train_stats.items() if 'total' in k or 'cls' in k or 'bbox' in k)}")
-        print(f"Val:   {' | '.join(f'{k}: {v:.4f}' for k, v in val_stats.items() if 'total' in k or 'cls' in k or 'bbox' in k)}")
+        reported = ("loss_cls", "loss_bbox", "loss_giou", "loss_mask_focal",
+                    "loss_mask_dice", "loss_total",
+                    "stat_mask_iou", "stat_mask_pred_fg", "stat_mask_matched")
+        print(f"Train: {' | '.join(f'{k}: {train_stats[k]:.4f}' for k in reported if k in train_stats)}")
+        print(f"Val:   {' | '.join(f'{k}: {val_stats[k]:.4f}' for k in reported if k in val_stats)}")
 
         val_loss = val_stats.get("loss_total", float("inf"))
         is_best = val_loss < best_val_loss
@@ -223,16 +276,33 @@ def build_optimizer(model: nn.Module, cfg: dict) -> Optimizer:
     """AdamW with different LRs for backbone vs. rest."""
     lr = cfg.get("lr", 2e-4)
     lr_backbone = cfg.get("lr_backbone", 2e-5)
+    mask_lr_mult = cfg.get("mask_lr_mult", 1.0)
     wd = cfg.get("weight_decay", 1e-4)
 
     backbone_params = list(model.backbone.parameters())
     backbone_ids = set(id(p) for p in backbone_params)
-    other_params = [p for p in model.parameters() if id(p) not in backbone_ids]
+
+    def is_mask_param(name: str) -> bool:
+        return ("mask_head" in name) or ("pixel_decoder" in name)
+
+    mask_ids = set(
+        id(p) for n, p in model.named_parameters() if is_mask_param(n)
+    )
+    other_params = [
+        p for p in model.parameters()
+        if id(p) not in backbone_ids and id(p) not in mask_ids
+    ]
+    mask_params = [
+        p for n, p in model.named_parameters()
+        if is_mask_param(n) and id(p) not in backbone_ids
+    ]
 
     param_groups = [
         {"params": backbone_params, "lr": lr_backbone},
         {"params": other_params, "lr": lr},
     ]
+    if mask_params:
+        param_groups.append({"params": mask_params, "lr": lr * mask_lr_mult})
     return torch.optim.AdamW(param_groups, weight_decay=wd)
 
 

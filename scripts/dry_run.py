@@ -426,10 +426,10 @@ def mini_infer(model, device, data_dir, img_size):
             mask_threshold=0.3,
             start_frame=0,
         )
-        man_track = res_dir / "man_track.txt"
-        assert man_track.exists(), "man_track.txt 未生成"
+        man_track = res_dir / "res_track.txt"
+        assert man_track.exists(), "res_track.txt 未生成"
         masks = list(res_dir.glob("mask*.tif"))
-        R.ok("推理 + CTC 输出", f"{len(masks)} 个掩码文件 + man_track.txt")
+        R.ok("推理 + CTC 输出", f"{len(masks)} 个掩码文件 + res_track.txt")
         return True
     except Exception as e:
         R.fail("推理 + CTC 输出", traceback.format_exc()[-500:])

@@ -181,6 +181,10 @@ class MaskHead(nn.Module):
             nn.ReLU(),
             nn.Linear(d_model, mask_channels),
         )
+        # Normalise the pixel features so the dot-product logits have a usable
+        # dynamic range from the start (the raw H/4 conv features were tiny, so
+        # every logit collapsed onto sigmoid~0.5).
+        self.feat_norm = nn.GroupNorm(32, mask_channels)
 
     def forward(self, query_embed: Tensor, mask_features: Tensor) -> Tensor:
         """
@@ -189,6 +193,7 @@ class MaskHead(nn.Module):
         Returns: (B, N, H, W)
         """
         mask_embed = self.mask_embed(query_embed)  # (B, N, mask_channels)
+        mask_features = self.feat_norm(mask_features)
         B, C, H, W = mask_features.shape
         # Dot product: (B, N, C) × (B, C, H*W) → (B, N, H*W) → (B, N, H, W)
         masks = torch.einsum("bnc,bchw->bnhw", mask_embed, mask_features)

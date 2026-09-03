@@ -17,6 +17,7 @@ Target format returned per sample:
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -95,6 +96,7 @@ class CTCCocoDataset(Dataset):
         self,
         img_dir: str,
         ann_file: str,
+        ignore_dir: Optional[str] = None,
         transforms=None,
         target_size: Optional[Tuple[int, int]] = (512, 512),
         in_channels: int = 3,
@@ -102,16 +104,50 @@ class CTCCocoDataset(Dataset):
         augment: bool = True,
     ):
         self.img_dir = img_dir
+        self.ignore_dir = ignore_dir
         self.coco = CocoAnnotations(ann_file)
         self.transforms = transforms
         self.target_size = target_size
         self.in_channels = in_channels
         self.temporal_window = temporal_window
         self.augment = augment
-        self.ids = self.coco.image_ids
-        # Clip endpoints so we always have a full window
-        half = temporal_window // 2
-        self.ids = self.ids[half: len(self.ids) - half]
+        # Build temporal windows independently inside each generated/CTC sequence.
+        # COCO ids are global and therefore cannot safely define adjacency.
+        sequences: Dict[str, List[int]] = {}
+        for image_id in self.coco.image_ids:
+            info = self.coco.images[image_id]
+            sequence = str(
+                info.get("man_track_id")
+                or info.get("ctc_id")
+                or info.get("sequence_id")
+                or self._sequence_from_filename(info.get("file_name", ""))
+            )
+            sequences.setdefault(sequence, []).append(image_id)
+        self.sequence_ids = {
+            key: sorted(ids, key=lambda iid: self._frame_number(self.coco.images[iid]))
+            for key, ids in sequences.items()
+        }
+        self.id_to_sequence_pos = {
+            iid: (key, pos)
+            for key, ids in self.sequence_ids.items()
+            for pos, iid in enumerate(ids)
+        }
+        self.ids = [iid for ids in self.sequence_ids.values() for iid in ids]
+
+    @staticmethod
+    def _sequence_from_filename(file_name: str) -> str:
+        match = re.search(r"(?:CTC_)?([^/]+?)_frame_\d+", Path(file_name).stem)
+        return match.group(1) if match else str(Path(file_name).parent)
+
+    @staticmethod
+    def _frame_number(info: dict) -> int:
+        match = re.search(r"_frame_(\d+)", info.get("file_name", ""))
+        if match:
+            return int(match.group(1))
+        if "frame_id" in info:
+            return int(info["frame_id"])
+        match = re.search(r"(\d+)(?=\.[^.]+$)", info.get("file_name", ""))
+        return int(match.group(1)) if match else int(info["id"])
 
     def __len__(self) -> int:
         return len(self.ids)
@@ -127,8 +163,9 @@ class CTCCocoDataset(Dataset):
         return img
 
     def _load_target(self, image_id: int, H: int, W: int) -> Dict:
+        img_info = self.coco.images[image_id]
         anns = self.coco.get_anns(image_id)
-        labels, boxes, masks, track_ids = [], [], [], []
+        labels, boxes, masks, mask_valid, track_ids = [], [], [], [], []
         for ann in anns:
             labels.append(0)  # all cells are class 0
             # COCO bbox: [x, y, w, h] → cxcywh normalised
@@ -139,20 +176,34 @@ class CTCCocoDataset(Dataset):
             # Segmentation mask
             if "segmentation" in ann and ann["segmentation"]:
                 m = self.coco.decode_seg(ann["segmentation"], H, W)
+                has_valid_mask = bool(m.any())
             else:
                 m = np.zeros((H, W), dtype=bool)
-                x0, y0 = int(x), int(y)
-                x1, y1 = min(W, int(x + bw)), min(H, int(y + bh))
-                m[y0:y1, x0:x1] = True
+                has_valid_mask = False
             masks.append(m)
+            mask_valid.append(has_valid_mask)
             track_ids.append(ann.get("track_id", 0))
 
+        ignore_mask = np.zeros((H, W), dtype=bool)
+        ignore_name = img_info.get("ignore_mask_file")
+        if self.ignore_dir and ignore_name and img_info.get("has_ignore_mask", True):
+            ignore_path = os.path.join(self.ignore_dir, ignore_name)
+            if os.path.exists(ignore_path):
+                ignore_mask = np.asarray(Image.open(ignore_path)) > 0
+
+        sequence, _ = self.id_to_sequence_pos[image_id]
         return {
             "labels": torch.tensor(labels, dtype=torch.long),
             "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros(0, 4),
             "masks": torch.from_numpy(np.stack(masks, 0)) if masks else torch.zeros(0, H, W, dtype=torch.bool),
+            # Keep detection/tracking supervision for annotations whose polygon
+            # is absent or decodes empty, but exclude them from mask losses.
+            "mask_valid": torch.tensor(mask_valid, dtype=torch.bool),
             "track_ids": torch.tensor(track_ids, dtype=torch.long),
+            "ignore_mask": torch.from_numpy(ignore_mask),
             "image_id": image_id,
+            "sequence_id": sequence,
+            "frame_id": self._frame_number(img_info),
             "orig_size": (H, W),
         }
 
@@ -195,19 +246,26 @@ class CTCCocoDataset(Dataset):
             ).squeeze(1).bool()
             target = dict(target)
             target["masks"] = masks_resized
-            target["orig_size"] = (H_new, W_new)
+        if "ignore_mask" in target:
+            target = dict(target)
+            target["ignore_mask"] = F.interpolate(
+                target["ignore_mask"].float()[None, None],
+                size=(H_new, W_new), mode="nearest",
+            )[0, 0].bool()
+        target["orig_size"] = (H_new, W_new)
         return target
 
     def __getitem__(self, idx: int) -> Tuple[List[Tensor], Dict]:
         curr_id = self.ids[idx]
         half = self.temporal_window // 2
-        curr_pos = self.coco.image_ids.index(curr_id)
+        sequence, curr_pos = self.id_to_sequence_pos[curr_id]
+        sequence_ids = self.sequence_ids[sequence]
 
         # Gather window of frame ids (clamp at boundaries)
         frame_ids = []
         for offset in range(-half, half + 1):
-            pos = max(0, min(len(self.coco.image_ids) - 1, curr_pos + offset))
-            frame_ids.append(self.coco.image_ids[pos])
+            pos = max(0, min(len(sequence_ids) - 1, curr_pos + offset))
+            frame_ids.append(sequence_ids[pos])
 
         # Load and preprocess each frame
         images = []
@@ -260,18 +318,30 @@ def collate_fn(batch):
 def build_dataset(cfg: dict, split: str = "train") -> CTCCocoDataset:
     data_dir = cfg.get("data_dir", "data")
     dataset_name = cfg.get("dataset", "ctchuh7")
-    ann_file = os.path.join(data_dir, dataset_name, "COCO", "annotations", f"instances_{split}.json")
-    img_dir = os.path.join(data_dir, dataset_name, "CTC", split)
+    ann_file = cfg.get(
+        f"{split}_ann_file",
+        os.path.join(data_dir, dataset_name, "COCO", "annotations", f"instances_{split}.json"),
+    )
+    img_dir = cfg.get(
+        f"{split}_img_dir",
+        os.path.join(data_dir, dataset_name, "CTC", split),
+    )
+    ignore_dir = cfg.get(f"{split}_ignore_dir")
 
     target_size = cfg.get("target_size", (512, 512))
     if isinstance(target_size, int):
         target_size = (target_size, target_size)
 
-    return CTCCocoDataset(
+    dataset = CTCCocoDataset(
         img_dir=img_dir,
         ann_file=ann_file,
+        ignore_dir=ignore_dir,
         target_size=tuple(target_size) if target_size else None,
         in_channels=cfg.get("backbone_in_channels", 3),
         temporal_window=3,
         augment=(split == "train"),
     )
+    max_samples = cfg.get(f"{split}_max_samples")
+    if max_samples is not None:
+        dataset.ids = dataset.ids[:int(max_samples)]
+    return dataset
