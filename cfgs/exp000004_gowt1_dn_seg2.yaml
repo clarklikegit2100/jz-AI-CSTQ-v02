@@ -1,0 +1,54 @@
+base_config: base_bsgm.yaml
+
+# SEG push, take 2: the working gowt1_dn_allframes config (query collapse solved,
+# mask IoU 0.52 and still climbing at epoch 22) extended to 60 epochs.
+# The gowt1_dn_seg variant (H/2 masks + all-layer DN + higher mask LR) stalled
+# mask training, so revert those and just give the proven setup more time.
+output_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000004-jz-AI-CSTQ-v02-20260902/03-Result/diagnostics/gowt1_dn_seg2
+dataset: ctcgowt1_exp000004_dn
+seed: 42
+train_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+train_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+train_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+val_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+val_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+val_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+
+backbone: resnet50
+backbone_pretrained: true
+decoder_use_graph: false
+decoder_use_query_mamba: false
+
+dn_number: 5
+dn_box_noise_scale: 0.4
+dn_aux: false
+
+mask_stride: 4
+
+target_size: [256, 256]
+num_queries: 60
+batch_size: 1
+num_workers: 4
+epochs: 60
+warmup_epochs: 3
+mask_warmup_epochs: 5
+max_track_queries: 0
+use_amp: false
+save_checkpoint_every: 5
+lr: 0.0002
+lr_backbone: 0.00002
+lr_drop: 45
+mask_lr_mult: 2.0
+clip_max_norm: 1.0
+max_val_steps: 40
+
+mask_num_points: 12544
+mask_gt_bbox_fraction: 0.5
+cost_mask_points: 3000
+mask_loss_type: bce
+
+cls_loss_coef: 2.0
+bbox_loss_coef: 5.0
+giou_loss_coef: 2.0
+mask_loss_coef: 5.0
+dice_loss_coef: 5.0

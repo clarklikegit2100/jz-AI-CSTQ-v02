@@ -220,6 +220,7 @@ class SetCriterion(nn.Module):
         # queries / masks collapse to one central blob.
         self.matching_mode = "hungarian"   # "hungarian" | "capture" | "frozen"
         self.frozen_indices: Dict[int, Tuple[Tensor, Tensor]] = {}
+        self.dn_aux = True
         # Toggled per-epoch by the training loop: keep mask terms out of the
         # backward pass until the matcher (box/class driven) has stabilised.
         self.mask_enabled = True
@@ -493,7 +494,7 @@ class SetCriterion(nn.Module):
             for k, v in self.loss_masks(dn_out, targets, dn_indices, n_dn).items():
                 losses[f"{k}_dn"] = v
             # DN loss at every decoder layer (deep supervision)
-            if "dn_pred_logits_aux" in outputs:
+            if self.dn_aux and "dn_pred_logits_aux" in outputs:
                 for li in range(outputs["dn_pred_logits_aux"].shape[0]):
                     dn_aux = {
                         "pred_logits": outputs["dn_pred_logits_aux"][li],
@@ -575,7 +576,7 @@ def build_criterion(cfg: dict) -> SetCriterion:
         "loss_mask_dice":  cfg.get("dice_loss_coef", 5.0),
     }
 
-    return SetCriterion(
+    crit = SetCriterion(
         matcher=matcher,
         loss_weights=loss_weights,
         num_classes=cfg.get("num_classes", 1),
@@ -588,3 +589,5 @@ def build_criterion(cfg: dict) -> SetCriterion:
         mask_gt_bbox_fraction=cfg.get("mask_gt_bbox_fraction", 0.5),
         mask_loss_type=cfg.get("mask_loss_type", "bce"),
     )
+    crit.dn_aux = cfg.get("dn_aux", True)
+    return crit
