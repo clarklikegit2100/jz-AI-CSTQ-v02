@@ -294,6 +294,9 @@ class BSGMCellTrack(nn.Module):
         with_box_refine: bool = True,
         # DN-Track
         dn_track: bool = False,
+        # Query denoising (DN-DETR): >0 enables it during training
+        dn_number: int = 0,
+        dn_box_noise_scale: float = 0.4,
     ):
         super().__init__()
         self.d_model = d_model
@@ -373,6 +376,13 @@ class BSGMCellTrack(nn.Module):
             # from a near-identical top-k encoder token and the decoder
             # self-attention collapses them to one prediction.
             self.query_content_embed = nn.Embedding(num_queries, d_model)
+
+        # ----- Query denoising -----
+        self.dn_number = dn_number
+        self.dn_box_noise_scale = dn_box_noise_scale
+        if dn_number > 0:
+            # single foreground class ("cell") -> one shared label embedding
+            self.dn_label_embed = nn.Embedding(1, d_model)
 
         # ----- Decoder -----
         self.decoder = BSGMDecoder(
@@ -544,6 +554,37 @@ class BSGMCellTrack(nn.Module):
         return topk_coords, topk_feats
 
     # -------------------------------------------------------------------------
+    # Query denoising (DN-DETR)
+    # -------------------------------------------------------------------------
+
+    def _prepare_dn(self, targets, device):
+        """
+        Build denoising queries from noised ground-truth boxes (batch size 1).
+
+        Returns (dn_tgt, dn_ref, meta) or None when there are no GT boxes.
+          dn_tgt : (1, G*M, d_model)  content queries (shared label embedding)
+          dn_ref : (1, G*M, 4)        reference points in logit space
+          meta   : {num_dn, num_groups, M, gt_idx}
+        """
+        gt = targets[0]["boxes"][:, :4].to(device)      # (M, 4) cxcywh in [0, 1]
+        M = gt.shape[0]
+        if M == 0:
+            return None
+        G = self.dn_number
+        known = gt.repeat(G, 1)                          # (G*M, 4)
+        gt_idx = torch.arange(M, device=device).repeat(G)
+
+        # centre shift up to 0.5*wh, size jitter up to 0.5*wh, scaled by noise_scale
+        span = torch.cat([known[:, 2:] * 0.5, known[:, 2:] * 0.5], dim=-1)
+        rand = torch.rand_like(known) * 2.0 - 1.0
+        noised = (known + rand * span * self.dn_box_noise_scale).clamp(1e-4, 1 - 1e-4)
+
+        dn_ref = inverse_sigmoid(noised).unsqueeze(0)                        # (1, G*M, 4)
+        dn_tgt = self.dn_label_embed.weight[0].expand(G * M, -1).unsqueeze(0).contiguous()
+        meta = {"num_dn": G * M, "num_groups": G, "M": M, "gt_idx": gt_idx}
+        return dn_tgt, dn_ref, meta
+
+    # -------------------------------------------------------------------------
     # Forward
     # -------------------------------------------------------------------------
 
@@ -615,14 +656,37 @@ class BSGMCellTrack(nn.Module):
             track_ref = inverse_sigmoid(track_query_boxes[..., :ndim].clamp(1e-6, 1 - 1e-6))
             ref_pts = torch.cat([track_ref, ref_pts], dim=1)
 
-        # ---- Build self-attention mask (keep track / detection groups separate) ----
+        # ---- Prepend denoising queries (training only): [dn | track | object] ----
+        dn_meta = None
+        num_dn = 0
+        if self.training and targets is not None and self.dn_number > 0 and ref_pts.shape[-1] == 4:
+            dn = self._prepare_dn(targets, tgt.device)
+            if dn is not None:
+                dn_tgt, dn_ref, dn_meta = dn
+                num_dn = dn_meta["num_dn"]
+                tgt = torch.cat([dn_tgt, tgt], dim=1)
+                ref_pts = torch.cat([dn_ref, ref_pts], dim=1)
+
+        # ---- Build self-attention mask ----
         N_total = tgt.shape[1]
         self_attn_mask = None
-        if num_track > 0:
-            self_attn_mask = torch.zeros(N_total, N_total, dtype=torch.bool, device=tgt.device)
-            # track queries don't attend to object queries and vice versa
-            self_attn_mask[:num_track, num_track:] = True
-            self_attn_mask[num_track:, :num_track] = True
+        if num_track > 0 or num_dn > 0:
+            m = torch.zeros(N_total, N_total, dtype=torch.bool, device=tgt.device)
+            if num_track > 0:
+                t0, t1 = num_dn, num_dn + num_track
+                m[t0:t1, t1:] = True
+                m[t1:, t0:t1] = True
+            if num_dn > 0:
+                # non-DN queries must not see DN queries and vice versa
+                m[num_dn:, :num_dn] = True
+                m[:num_dn, num_dn:] = True
+                # DN group g cannot see DN group g'
+                Mg = dn_meta["M"]
+                for gi in range(dn_meta["num_groups"]):
+                    for gj in range(dn_meta["num_groups"]):
+                        if gi != gj:
+                            m[gi * Mg:(gi + 1) * Mg, gj * Mg:(gj + 1) * Mg] = True
+            self_attn_mask = m
 
         # ---- Box refinement closure ----
         if self.with_box_refine:
@@ -690,6 +754,24 @@ class BSGMCellTrack(nn.Module):
         # ---- Uncertainty (last decoder layer) ----
         uncertainty = self.uncertainty_head(last_hs)  # (B, N_total, 1)
 
+        # ---- Split off denoising queries ----
+        dn_out = {}
+        if num_dn > 0:
+            dn_out = {
+                "dn_pred_logits": pred_logits[-1][:, :num_dn],
+                "dn_pred_boxes": pred_boxes[-1][:, :num_dn],
+                "dn_meta": dn_meta,
+            }
+            if pred_masks is not None:
+                dn_out["dn_pred_masks"] = pred_masks[:, :num_dn]
+            pred_logits = pred_logits[:, :, num_dn:]
+            pred_boxes = pred_boxes[:, :, num_dn:]
+            all_refs = all_refs[:, :, num_dn:]
+            last_hs = last_hs[:, num_dn:]
+            uncertainty = uncertainty[:, num_dn:]
+            if pred_masks is not None:
+                pred_masks = pred_masks[:, num_dn:]
+
         out = {
             "pred_logits": pred_logits[-1],       # (B, N_total, num_classes+1) — final layer
             "pred_boxes": pred_boxes[-1],         # (B, N_total, 4 or 8)
@@ -703,6 +785,7 @@ class BSGMCellTrack(nn.Module):
             out["pred_masks"] = pred_masks
         if enc_outputs:
             out["enc_outputs"] = enc_outputs
+        out.update(dn_out)
 
         # Split track vs. object query outputs for tracking logic
         if num_track > 0:
@@ -804,4 +887,6 @@ def build_model(cfg: dict) -> "BSGMCellTrack":
         two_stage=cfg.get("two_stage", True),
         with_box_refine=cfg.get("with_box_refine", True),
         dn_track=cfg.get("dn_track", False),
+        dn_number=cfg.get("dn_number", 0),
+        dn_box_noise_scale=cfg.get("dn_box_noise_scale", 0.4),
     )

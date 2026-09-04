@@ -90,13 +90,14 @@ def train_one_epoch(
         with torch.amp.autocast("cuda", enabled=use_amp and device.type == "cuda"):
             # During warmup: don't pass track queries
             if stage == "warmup":
-                outputs = model(images)
+                outputs = model(images, targets=targets)
             else:
                 track_hs, track_boxes = _previous_frame_track_queries(
                     model, images, max_track_queries,
                 )
                 outputs = model(
                     images,
+                    targets=targets,
                     track_query_hs_embeds=track_hs,
                     track_query_boxes=track_boxes,
                 )

@@ -1,0 +1,60 @@
+base_config: base_bsgm.yaml
+
+# GOWT1 all-frames (460) training with query denoising — the fix for the
+# object-query common-mode collapse (see FINDINGS_query_collapse.md).
+#   - ImageNet ResNet-50 backbone
+#   - decoder graph/Mamba disabled (they homogenise the query set and don't
+#     respect the DN attention mask)
+#   - DN-DETR query denoising: 5 groups of noised GT boxes as auxiliary queries
+#   - point-sampled dice+BCE mask loss
+output_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000004-jz-AI-CSTQ-v02-20260902/03-Result/diagnostics/gowt1_dn_allframes
+dataset: ctcgowt1_exp000004_dn
+seed: 42
+train_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+train_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+train_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+val_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+val_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+val_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+
+# --- backbone ---
+backbone: resnet50
+backbone_pretrained: true
+
+# --- decoder ---
+decoder_use_graph: false
+decoder_use_query_mamba: false
+
+# --- query denoising ---
+dn_number: 5
+dn_box_noise_scale: 0.4
+
+target_size: [256, 256]
+num_queries: 60
+batch_size: 1
+num_workers: 4
+epochs: 24
+warmup_epochs: 3
+mask_warmup_epochs: 5
+max_track_queries: 0
+use_amp: false
+save_checkpoint_every: 4
+lr: 0.0002
+lr_backbone: 0.00002
+lr_drop: 20
+mask_lr_mult: 2.0
+clip_max_norm: 1.0
+max_val_steps: 40          # val loss on a 40-frame slice (speed)
+
+# --- mask supervision ---
+mask_num_points: 12544
+mask_gt_bbox_fraction: 0.5
+cost_mask_points: 3000
+mask_loss_type: bce
+
+# --- loss weights ---
+cls_loss_coef: 2.0
+bbox_loss_coef: 5.0
+giou_loss_coef: 2.0
+mask_loss_coef: 5.0
+dice_loss_coef: 5.0

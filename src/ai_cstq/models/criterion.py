@@ -473,6 +473,26 @@ class SetCriterion(nn.Module):
         losses.update(self.loss_boxes(outputs, targets, indices, num_cells))
         losses.update(self.loss_masks(outputs, targets, indices, num_cells))
 
+        # --- Query denoising (fixed assignment, no matcher) ---
+        if "dn_meta" in outputs and outputs["dn_meta"] is not None:
+            dn = outputs["dn_meta"]
+            gt_idx = dn["gt_idx"].detach().cpu()
+            src_idx = torch.arange(dn["num_dn"])
+            dn_indices = [(src_idx, gt_idx)]
+            dn_out = {
+                "pred_logits": outputs["dn_pred_logits"],
+                "pred_boxes": outputs["dn_pred_boxes"],
+            }
+            if "dn_pred_masks" in outputs:
+                dn_out["pred_masks"] = outputs["dn_pred_masks"]
+            n_dn = max(dn["num_dn"], 1)
+            for k, v in self.loss_labels(dn_out, targets, dn_indices, n_dn).items():
+                losses[f"{k}_dn"] = v
+            for k, v in self.loss_boxes(dn_out, targets, dn_indices, n_dn).items():
+                losses[f"{k}_dn"] = v
+            for k, v in self.loss_masks(dn_out, targets, dn_indices, n_dn).items():
+                losses[f"{k}_dn"] = v
+
         # --- Auxiliary layers ---
         if "pred_logits_aux" in outputs:
             for li in range(outputs["pred_logits_aux"].shape[0]):
