@@ -114,13 +114,16 @@ class DeformableEncoder(nn.Module):
 
 class FPNPixelDecoder(nn.Module):
     """
-    Light FPN pixel decoder: fuses P2–P5 → high-res mask features.
-    Returns (B, mask_channels, H/4, W/4) — same resolution as C2.
+    Light FPN pixel decoder: fuses P2–P5, then a learned 2x upsample so the
+    per-query masks are predicted at H/2 (was H/4). The coarser H/4 grid caps
+    boundary precision for small cells (a 15 px cell is ~4 px on H/4).
     """
 
-    def __init__(self, d_model: int = 256, mask_channels: int = 128, num_levels: int = 4):
+    def __init__(self, d_model: int = 256, mask_channels: int = 128, num_levels: int = 4,
+                 mask_stride: int = 2):
         super().__init__()
         self.num_levels = num_levels
+        self.mask_stride = mask_stride
         # Lateral convolutions (already at d_model from backbone+FPN)
         self.lateral_convs = nn.ModuleList([
             nn.Conv2d(d_model, d_model, 1) for _ in range(num_levels)
@@ -134,7 +137,18 @@ class FPNPixelDecoder(nn.Module):
             )
             for _ in range(num_levels)
         ])
-        # Final projection to mask_channels at C2 scale
+        # Upsample the C2 (H/4) map by 2x per step down to H/mask_stride
+        n_up = max(0, (4 // max(mask_stride, 1)).bit_length() - 1)
+        up = []
+        for _ in range(n_up):
+            up += [
+                nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                nn.Conv2d(d_model, d_model, 3, padding=1),
+                nn.GroupNorm(32, d_model),
+                nn.ReLU(inplace=True),
+            ]
+        self.upsample = nn.Sequential(*up) if up else nn.Identity()
+        # Final projection to mask_channels
         self.mask_proj = nn.Conv2d(d_model, mask_channels, 1)
         self._init_weights()
 
@@ -148,7 +162,7 @@ class FPNPixelDecoder(nn.Module):
     def forward(self, fpn_features: List[Tensor]) -> Tensor:
         """
         fpn_features: [P2, P3, P4, P5] (B, d_model, H/s, W/s)
-        Returns: mask_features (B, mask_channels, H/4, W/4)
+        Returns: mask_features (B, mask_channels, H/mask_stride, W/mask_stride)
         """
         laterals = [self.lateral_convs[i](fpn_features[i]) for i in range(self.num_levels)]
 
@@ -158,8 +172,8 @@ class FPNPixelDecoder(nn.Module):
             laterals[i - 1] = laterals[i - 1] + F.interpolate(laterals[i], size=(h, w), mode="nearest")
 
         outs = [self.output_convs[i](laterals[i]) for i in range(self.num_levels)]
-        # Use the highest resolution (C2) as the final mask features
-        return self.mask_proj(outs[0])
+        feat = self.upsample(outs[0])
+        return self.mask_proj(feat)
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +311,8 @@ class BSGMCellTrack(nn.Module):
         # Query denoising (DN-DETR): >0 enables it during training
         dn_number: int = 0,
         dn_box_noise_scale: float = 0.4,
+        # Mask prediction resolution: input stride of the per-query mask grid
+        mask_stride: int = 4,
     ):
         super().__init__()
         self.d_model = d_model
@@ -427,7 +443,8 @@ class BSGMCellTrack(nn.Module):
         # Mask heads
         if with_mask:
             self.pixel_decoder = FPNPixelDecoder(
-                d_model=d_model, mask_channels=mask_channels, num_levels=num_feature_levels
+                d_model=d_model, mask_channels=mask_channels,
+                num_levels=num_feature_levels, mask_stride=mask_stride,
             )
             self.mask_head = MaskHead(d_model=d_model, mask_channels=mask_channels)
 
@@ -767,6 +784,8 @@ class BSGMCellTrack(nn.Module):
             dn_out = {
                 "dn_pred_logits": pred_logits[-1][:, :num_dn],
                 "dn_pred_boxes": pred_boxes[-1][:, :num_dn],
+                "dn_pred_logits_aux": pred_logits[:-1][:, :, :num_dn],
+                "dn_pred_boxes_aux": pred_boxes[:-1][:, :, :num_dn],
                 "dn_meta": dn_meta,
             }
             if pred_masks is not None:
@@ -896,4 +915,5 @@ def build_model(cfg: dict) -> "BSGMCellTrack":
         dn_track=cfg.get("dn_track", False),
         dn_number=cfg.get("dn_number", 0),
         dn_box_noise_scale=cfg.get("dn_box_noise_scale", 0.4),
+        mask_stride=cfg.get("mask_stride", 4),
     )

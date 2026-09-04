@@ -492,6 +492,17 @@ class SetCriterion(nn.Module):
                 losses[f"{k}_dn"] = v
             for k, v in self.loss_masks(dn_out, targets, dn_indices, n_dn).items():
                 losses[f"{k}_dn"] = v
+            # DN loss at every decoder layer (deep supervision)
+            if "dn_pred_logits_aux" in outputs:
+                for li in range(outputs["dn_pred_logits_aux"].shape[0]):
+                    dn_aux = {
+                        "pred_logits": outputs["dn_pred_logits_aux"][li],
+                        "pred_boxes": outputs["dn_pred_boxes_aux"][li],
+                    }
+                    for k, v in self.loss_labels(dn_aux, targets, dn_indices, n_dn).items():
+                        losses[f"{k}_dn_aux{li}"] = v
+                    for k, v in self.loss_boxes(dn_aux, targets, dn_indices, n_dn).items():
+                        losses[f"{k}_dn_aux{li}"] = v
 
         # --- Auxiliary layers ---
         if "pred_logits_aux" in outputs:
