@@ -212,6 +212,14 @@ class SetCriterion(nn.Module):
         self.mask_importance_sample_ratio = mask_importance_sample_ratio
         self.mask_gt_bbox_fraction = mask_gt_bbox_fraction
         self.mask_loss_type = mask_loss_type
+        # Frozen matching: once detection has converged the training loop can
+        # snapshot the query->GT assignment ("capture") and then reuse it
+        # ("frozen") so the mask head trains each query toward a fixed cell.
+        # Without this the Hungarian assignment keeps permuting while masks are
+        # learned, so every query is trained toward the *mean* cell and the
+        # queries / masks collapse to one central blob.
+        self.matching_mode = "hungarian"   # "hungarian" | "capture" | "frozen"
+        self.frozen_indices: Dict[int, Tuple[Tensor, Tensor]] = {}
         # Toggled per-epoch by the training loop: keep mask terms out of the
         # backward pass until the matcher (box/class driven) has stabilised.
         self.mask_enabled = True
@@ -446,7 +454,21 @@ class SetCriterion(nn.Module):
         num_cells = max(num_cells, 1)
 
         # --- Main layer ---
-        indices = self.matcher(outputs, targets)
+        if self.matching_mode == "frozen" and all(
+            int(t["image_id"]) in self.frozen_indices for t in targets
+        ):
+            indices = [
+                tuple(x.to(outputs["pred_logits"].device) for x in
+                      self.frozen_indices[int(t["image_id"])])
+                for t in targets
+            ]
+        else:
+            indices = self.matcher(outputs, targets)
+            if self.matching_mode == "capture" and self.training:
+                for t, idx in zip(targets, indices):
+                    self.frozen_indices[int(t["image_id"])] = (
+                        idx[0].detach().cpu().clone(), idx[1].detach().cpu().clone(),
+                    )
         losses.update(self.loss_labels(outputs, targets, indices, num_cells))
         losses.update(self.loss_boxes(outputs, targets, indices, num_cells))
         losses.update(self.loss_masks(outputs, targets, indices, num_cells))

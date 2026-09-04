@@ -259,6 +259,7 @@ class BSGMCellTrack(nn.Module):
         backbone_in_channels: int = 3,
         swin_window_size: int = 7,
         swin_pretrained: Optional[str] = None,
+        backbone_pretrained=None,   # True -> torchvision ImageNet; str -> ckpt path
         # Transformer
         d_model: int = 256,
         nhead: int = 8,
@@ -307,14 +308,25 @@ class BSGMCellTrack(nn.Module):
         self.num_feature_levels = num_feature_levels
 
         # ----- Backbone -----
-        self.backbone = SwinTransformerBackbone(
-            arch=backbone_arch,
-            in_channels=backbone_in_channels,
-            out_channels=d_model,
-            window_size=swin_window_size,
-        )
-        if swin_pretrained:
-            self.backbone.load_pretrained(swin_pretrained)
+        if backbone_pretrained is None:
+            backbone_pretrained = swin_pretrained
+        if backbone_arch.startswith("resnet"):
+            from .resnet_backbone import ResNetBackbone
+            self.backbone = ResNetBackbone(
+                arch=backbone_arch,
+                in_channels=backbone_in_channels,
+                out_channels=d_model,
+                pretrained=(backbone_pretrained is True or backbone_pretrained == "imagenet"),
+            )
+        else:
+            self.backbone = SwinTransformerBackbone(
+                arch=backbone_arch,
+                in_channels=backbone_in_channels,
+                out_channels=d_model,
+                window_size=swin_window_size,
+            )
+        if isinstance(backbone_pretrained, str) and backbone_pretrained not in ("imagenet",):
+            self.backbone.load_pretrained(backbone_pretrained)
 
         self.fpn_neck = FPNNeck(out_channels=d_model, num_levels=num_feature_levels)
 
@@ -352,6 +364,13 @@ class BSGMCellTrack(nn.Module):
                 self.query_embed = nn.Embedding(num_queries, d_model * 2)  # (content + pos)
             else:
                 self.query_embed = nn.Embedding(num_queries, d_model * 2)
+        else:
+            # DINO-style "mixed query selection": the anchor box comes from the
+            # encoder proposal, but the *content* query is a distinct learnable
+            # vector per slot. Without this every two-stage query is initialised
+            # from a near-identical top-k encoder token and the decoder
+            # self-attention collapses them to one prediction.
+            self.query_content_embed = nn.Embedding(num_queries, d_model)
 
         # ----- Decoder -----
         self.decoder = BSGMDecoder(
@@ -567,7 +586,10 @@ class BSGMCellTrack(nn.Module):
             tgt_coords, tgt_feats = self.gen_proposals(memory, spatial_shapes)
             # tgt_coords: (B, num_queries, 4) in [0,1] normalised
             ref_pts = inverse_sigmoid(tgt_coords)
-            tgt = tgt_feats
+            # DINO mixed query selection: anchor from the proposal, content query
+            # learnable and distinct per slot (tgt_feats stay for the two-stage
+            # encoder auxiliary loss only).
+            tgt = self.query_content_embed.weight.unsqueeze(0).expand(B, -1, -1)
             enc_outputs = {
                 "pred_logits": self.enc_cls_head(tgt_feats),
                 "pred_boxes": self.enc_box_head(tgt_feats).sigmoid(),
@@ -635,11 +657,15 @@ class BSGMCellTrack(nn.Module):
             hs_i = all_hs[li]
             logits = self.cls_head[li + offset](hs_i)    # (B, N_total, num_classes+1)
             boxes = self.box_head[li + offset](hs_i)     # (B, N_total, 4 or 8)
-            # Sigmoid for normalised coords
-            ref_sig_i = all_refs[li].sigmoid()
-            # Add reference offset for first 4 dims
+            # Deformable-DETR box head: the head predicts a delta in *logit*
+            # space that is added to the (logit-space) reference point, then
+            # squashed. The old code added the already-sigmoided reference to a
+            # logit-space delta, so the reference barely moved the output and
+            # every query drifted to the image centre (query collapse).
+            ref_i = all_refs[li]
+            r = ref_i.shape[-1]
             boxes_sig = boxes.clone()
-            boxes_sig[..., :2] = boxes_sig[..., :2] + ref_sig_i[..., :2]
+            boxes_sig[..., :r] = boxes[..., :r] + ref_i
             boxes_sig[..., :4] = boxes_sig[..., :4].sigmoid()
             if self.with_div and boxes.shape[-1] == 8:
                 boxes_sig[..., 4:6] = boxes_sig[..., 4:6].sigmoid()
@@ -748,6 +774,7 @@ def build_model(cfg: dict) -> "BSGMCellTrack":
         backbone_in_channels=cfg.get("backbone_in_channels", 3),
         swin_window_size=cfg.get("swin_window_size", 7),
         swin_pretrained=cfg.get("swin_pretrained", None),
+        backbone_pretrained=cfg.get("backbone_pretrained", None),
         d_model=cfg.get("hidden_dim", 256),
         nhead=cfg.get("nheads", 8),
         num_encoder_layers=cfg.get("enc_layers", 4),

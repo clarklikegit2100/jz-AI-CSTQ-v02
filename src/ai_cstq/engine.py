@@ -202,6 +202,7 @@ def train(
     max_train_steps = cfg.get("max_train_steps")
     max_val_steps = cfg.get("max_val_steps")
     mask_warmup_epochs = cfg.get("mask_warmup_epochs", 0)
+    freeze_matching = cfg.get("freeze_matching", False)
 
     best_val_loss = float("inf")
 
@@ -219,11 +220,23 @@ def train(
                 p.requires_grad_(True)
 
         criterion.mask_enabled = epoch >= mask_warmup_epochs
+        # Snapshot the query->GT assignment on the last detection-only epoch,
+        # then freeze it while the mask head is trained.
+        if not freeze_matching:
+            criterion.matching_mode = "hungarian"
+        elif epoch < mask_warmup_epochs - 1:
+            criterion.matching_mode = "hungarian"
+        elif epoch == mask_warmup_epochs - 1:
+            criterion.matching_mode = "capture"
+        else:
+            criterion.matching_mode = "frozen"
         if hasattr(criterion, "module"):
             criterion.module.mask_enabled = criterion.mask_enabled
+            criterion.module.matching_mode = criterion.matching_mode
 
         print(f"\n===== Epoch {epoch}/{total_epochs - 1}  stage={stage}  "
-              f"mask={'on' if criterion.mask_enabled else 'warmup'} =====")
+              f"mask={'on' if criterion.mask_enabled else 'warmup'}  "
+              f"match={criterion.matching_mode} =====")
         train_stats = train_one_epoch(
             model, criterion, train_loader, optimizer, device,
             epoch, max_norm=max_norm, use_amp=use_amp, stage=stage,
