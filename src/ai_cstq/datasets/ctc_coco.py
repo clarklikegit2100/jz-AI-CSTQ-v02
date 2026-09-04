@@ -17,6 +17,7 @@ Target format returned per sample:
 
 import json
 import os
+import random
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -102,6 +103,12 @@ class CTCCocoDataset(Dataset):
         in_channels: int = 3,
         temporal_window: int = 3,
         augment: bool = True,
+        # Tiled sampling (resolution_scaling_plan.md Phase 1): crop a native-
+        # resolution tile instead of downscaling the whole frame, so small
+        # cells keep their pixel size. None = old whole-frame-resize behaviour.
+        tile_size: Optional[int] = None,
+        tile_pos_ratio: float = 0.7,
+        tile_min_area_ratio: float = 0.3,
     ):
         self.img_dir = img_dir
         self.ignore_dir = ignore_dir
@@ -111,6 +118,9 @@ class CTCCocoDataset(Dataset):
         self.in_channels = in_channels
         self.temporal_window = temporal_window
         self.augment = augment
+        self.tile_size = tile_size
+        self.tile_pos_ratio = tile_pos_ratio
+        self.tile_min_area_ratio = tile_min_area_ratio
         # Build temporal windows independently inside each generated/CTC sequence.
         # COCO ids are global and therefore cannot safely define adjacency.
         sequences: Dict[str, List[int]] = {}
@@ -255,6 +265,89 @@ class CTCCocoDataset(Dataset):
         target["orig_size"] = (H_new, W_new)
         return target
 
+    def _sample_tile_origin(self, target: Dict, H: int, W: int) -> Tuple[int, int]:
+        """
+        Pick a tile origin: `tile_pos_ratio` of the time centred (with jitter)
+        on a random ground-truth cell, otherwise a uniform crop. Both crowded
+        and background tiles are needed so the model also learns "no cell here".
+        """
+        ts = self.tile_size
+        max_y0, max_x0 = max(H - ts, 0), max(W - ts, 0)
+        valid_idx = target["mask_valid"].nonzero(as_tuple=True)[0]
+        if len(valid_idx) > 0 and random.random() < self.tile_pos_ratio:
+            i = valid_idx[random.randrange(len(valid_idx))].item()
+            ys, xs = torch.where(target["masks"][i])
+            cy, cx = ys.float().mean().item(), xs.float().mean().item()
+            jitter = ts * 0.3
+            y0 = int(cy - ts / 2 + random.uniform(-jitter, jitter))
+            x0 = int(cx - ts / 2 + random.uniform(-jitter, jitter))
+        else:
+            y0 = random.randint(0, max_y0) if max_y0 > 0 else 0
+            x0 = random.randint(0, max_x0) if max_x0 > 0 else 0
+        return max(0, min(y0, max_y0)), max(0, min(x0, max_x0))
+
+    def _crop_target(self, target: Dict, y0: int, x0: int) -> Dict:
+        """
+        Crop target to the [y0:y0+ts, x0:x0+ts] tile. Boxes are recomputed from
+        the cropped mask (nearest-neighbour by construction: a crop, not a
+        resize). Instances with no decoded polygon (`mask_valid=False`) fall
+        back to their original pixel bbox intersected with the tile. Instances
+        that lose too much area to the crop (`tile_min_area_ratio`) are
+        dropped rather than kept as a tiny, ambiguous fragment.
+        """
+        ts = self.tile_size
+        H_orig, W_orig = target["orig_size"]
+        masks = target["masks"][:, y0:y0 + ts, x0:x0 + ts]
+        orig_area = target["masks"].flatten(1).sum(1).float()
+        new_area = masks.flatten(1).sum(1).float()
+        has_area = orig_area > 0
+        ratio = torch.where(has_area, new_area / orig_area.clamp(min=1), torch.zeros_like(orig_area))
+        keep_mask_based = has_area & (ratio >= self.tile_min_area_ratio)
+
+        boxes_px = target["boxes"].clone()
+        boxes_px[:, [0, 2]] *= W_orig
+        boxes_px[:, [1, 3]] *= H_orig
+        bx1 = boxes_px[:, 0] - boxes_px[:, 2] / 2
+        by1 = boxes_px[:, 1] - boxes_px[:, 3] / 2
+        bx2 = boxes_px[:, 0] + boxes_px[:, 2] / 2
+        by2 = boxes_px[:, 1] + boxes_px[:, 3] / 2
+        ix1, iy1 = bx1.clamp(min=x0), by1.clamp(min=y0)
+        ix2, iy2 = bx2.clamp(max=x0 + ts), by2.clamp(max=y0 + ts)
+        inter = (ix2 - ix1).clamp(min=0) * (iy2 - iy1).clamp(min=0)
+        orig_box_area = (bx2 - bx1).clamp(min=1e-6) * (by2 - by1).clamp(min=1e-6)
+        keep_box_based = (~has_area) & ((inter / orig_box_area) >= self.tile_min_area_ratio)
+
+        keep = keep_mask_based | keep_box_based
+        idx = keep.nonzero(as_tuple=True)[0]
+
+        new_masks = masks[idx]
+        new_boxes = torch.zeros(len(idx), 4)
+        for j, i in enumerate(idx.tolist()):
+            if has_area[i]:
+                ys, xs = torch.where(new_masks[j])
+                xb1, xb2 = xs.min().item(), xs.max().item() + 1
+                yb1, yb2 = ys.min().item(), ys.max().item() + 1
+            else:
+                xb1, xb2 = ix1[i].item() - x0, ix2[i].item() - x0
+                yb1, yb2 = iy1[i].item() - y0, iy2[i].item() - y0
+            new_boxes[j] = torch.tensor([
+                (xb1 + xb2) / 2 / ts, (yb1 + yb2) / 2 / ts,
+                max(xb2 - xb1, 1) / ts, max(yb2 - yb1, 1) / ts,
+            ])
+
+        return {
+            "labels": target["labels"][idx],
+            "boxes": new_boxes,
+            "masks": new_masks,
+            "mask_valid": target["mask_valid"][idx],
+            "track_ids": target["track_ids"][idx],
+            "ignore_mask": target["ignore_mask"][y0:y0 + ts, x0:x0 + ts],
+            "image_id": target["image_id"],
+            "sequence_id": target.get("sequence_id"),
+            "frame_id": target.get("frame_id"),
+            "orig_size": (ts, ts),
+        }
+
     def __getitem__(self, idx: int) -> Tuple[List[Tensor], Dict]:
         curr_id = self.ids[idx]
         half = self.temporal_window // 2
@@ -267,20 +360,26 @@ class CTCCocoDataset(Dataset):
             pos = max(0, min(len(sequence_ids) - 1, curr_pos + offset))
             frame_ids.append(sequence_ids[pos])
 
-        # Load and preprocess each frame
-        images = []
-        for fid in frame_ids:
-            raw = self._load_image(fid)
-            img_t = self._preprocess_image(raw)
-            images.append(img_t)
-
-        # Load target for current (middle) frame
         curr_raw = self._load_image(curr_id)
         H_orig, W_orig = curr_raw.shape[:2]
         target = self._load_target(curr_id, H_orig, W_orig)
 
-        if self.target_size is not None:
-            target = self._resize_target(target, self.target_size)
+        if self.tile_size is not None:
+            # Crop a native-resolution tile instead of downscaling the whole
+            # frame, so small cells keep their native pixel size. The same
+            # window is applied to every frame in the temporal clip.
+            y0, x0 = self._sample_tile_origin(target, H_orig, W_orig)
+            ts = self.tile_size
+            target = self._crop_target(target, y0, x0)
+            images = []
+            for fid in frame_ids:
+                raw = curr_raw if fid == curr_id else self._load_image(fid)
+                crop = raw[y0:y0 + ts, x0:x0 + ts]
+                images.append(self._preprocess_image(crop))
+        else:
+            images = [self._preprocess_image(self._load_image(fid)) for fid in frame_ids]
+            if self.target_size is not None:
+                target = self._resize_target(target, self.target_size)
 
         if self.transforms is not None:
             images, target = self.transforms(images, target)
@@ -332,6 +431,7 @@ def build_dataset(cfg: dict, split: str = "train") -> CTCCocoDataset:
     if isinstance(target_size, int):
         target_size = (target_size, target_size)
 
+    tile_size = cfg.get("tile_size")
     dataset = CTCCocoDataset(
         img_dir=img_dir,
         ann_file=ann_file,
@@ -340,6 +440,9 @@ def build_dataset(cfg: dict, split: str = "train") -> CTCCocoDataset:
         in_channels=cfg.get("backbone_in_channels", 3),
         temporal_window=3,
         augment=(split == "train"),
+        tile_size=tile_size,
+        tile_pos_ratio=cfg.get("tile_pos_ratio", 0.7),
+        tile_min_area_ratio=cfg.get("tile_min_area_ratio", 0.3),
     )
     max_samples = cfg.get(f"{split}_max_samples")
     if max_samples is not None:
