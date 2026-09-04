@@ -551,6 +551,11 @@ class BSGMCellTrack(nn.Module):
         topk_coords = torch.gather(all_proposals, 1, topk_idx.unsqueeze(-1).expand(-1, -1, 4))
         topk_feats = torch.gather(memory, 1, topk_idx.unsqueeze(-1).expand(-1, -1, C))
         topk_feats = self.enc_output_norm(self.enc_output(topk_feats))
+        # Deformable-DETR two-stage: refine each grid anchor by a delta predicted
+        # from its encoder feature, so the decoder starts from a real box guess
+        # rather than the bare grid-cell centre.
+        delta = self.enc_box_head(topk_feats)                       # (B, K, 4)
+        topk_coords = (inverse_sigmoid(topk_coords.clamp(1e-4, 1 - 1e-4)) + delta).sigmoid()
         return topk_coords, topk_feats
 
     # -------------------------------------------------------------------------
@@ -629,15 +634,17 @@ class BSGMCellTrack(nn.Module):
         num_track = 0
         if self.two_stage:
             tgt_coords, tgt_feats = self.gen_proposals(memory, spatial_shapes)
-            # tgt_coords: (B, num_queries, 4) in [0,1] normalised
-            ref_pts = inverse_sigmoid(tgt_coords)
+            # tgt_coords: (B, num_queries, 4) in [0,1] normalised (grid + delta).
+            # Detach the anchor fed to the decoder (standard two-stage): the enc
+            # loss trains the proposal, the decoder refines from a fixed anchor.
+            ref_pts = inverse_sigmoid(tgt_coords.detach().clamp(1e-4, 1 - 1e-4))
             # DINO mixed query selection: anchor from the proposal, content query
             # learnable and distinct per slot (tgt_feats stay for the two-stage
             # encoder auxiliary loss only).
             tgt = self.query_content_embed.weight.unsqueeze(0).expand(B, -1, -1)
             enc_outputs = {
                 "pred_logits": self.enc_cls_head(tgt_feats),
-                "pred_boxes": self.enc_box_head(tgt_feats).sigmoid(),
+                "pred_boxes": tgt_coords,     # same refined proposals the decoder anchors on
             }
         else:
             query_embed = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
