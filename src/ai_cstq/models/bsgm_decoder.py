@@ -199,8 +199,12 @@ class BSGMDecoderLayer(nn.Module):
         mamba_d_state: int = 16,
         bayesian_p: float = 0.1,
         bayesian_eval: bool = False,
+        use_graph: bool = True,
+        use_query_mamba: bool = True,
     ):
         super().__init__()
+        self.use_graph = use_graph
+        self.use_query_mamba = use_query_mamba
 
         # 1. Cell Graph Layer (spatial kNN GATv2)
         self.graph_layer = CellGraphLayer(
@@ -262,12 +266,14 @@ class BSGMDecoderLayer(nn.Module):
         query_pos: Optional[Tensor] = None,     # positional embedding
     ) -> Tensor:
         # 1. Graph layer (spatial cell relationships)
-        tgt2 = self.graph_layer(tgt, reference_points)
-        tgt = self.norm_graph(tgt2)
+        if self.use_graph:
+            tgt2 = self.graph_layer(tgt, reference_points)
+            tgt = self.norm_graph(tgt2)
 
         # 2. Query-level Mamba
-        tgt2 = self.query_mamba(tgt)
-        tgt = self.norm_mamba(tgt2)
+        if self.use_query_mamba:
+            tgt2 = self.query_mamba(tgt)
+            tgt = self.norm_mamba(tgt2)
 
         # 3. Bayesian dropout
         tgt = self.bayes_drop1(tgt)
@@ -321,6 +327,8 @@ class BSGMDecoder(nn.Module):
         return_intermediate: bool = True,
         # Box/query refinement
         use_dab: bool = True,
+        use_graph: bool = True,
+        use_query_mamba: bool = True,
     ):
         super().__init__()
         self.layers = nn.ModuleList([
@@ -335,6 +343,8 @@ class BSGMDecoder(nn.Module):
                 graph_topk=graph_topk,
                 graph_heads=graph_heads,
                 mamba_d_state=mamba_d_state,
+                use_graph=use_graph,
+                use_query_mamba=use_query_mamba,
                 bayesian_p=bayesian_p,
                 bayesian_eval=bayesian_eval,
             )

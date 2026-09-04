@@ -21,6 +21,14 @@ val_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp00000
 backbone: resnet50
 backbone_pretrained: true
 
+# --- decoder: disable the non-standard query-mixing blocks ---
+# The kNN graph layer + query-Mamba SSM run over the query set every decoder
+# layer and homogenise the 32 object queries (cos-sim -> 0.99) regardless of
+# the loss, which is why every query predicts the same box/mask. Reduce the
+# decoder to a standard DETR block (self-attn + deformable cross-attn).
+decoder_use_graph: false
+decoder_use_query_mamba: false
+
 target_size: [256, 256]
 num_queries: 32
 train_max_samples: 5

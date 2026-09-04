@@ -260,6 +260,8 @@ class BSGMCellTrack(nn.Module):
         swin_window_size: int = 7,
         swin_pretrained: Optional[str] = None,
         backbone_pretrained=None,   # True -> torchvision ImageNet; str -> ckpt path
+        decoder_use_graph: bool = True,
+        decoder_use_query_mamba: bool = True,
         # Transformer
         d_model: int = 256,
         nhead: int = 8,
@@ -387,6 +389,8 @@ class BSGMCellTrack(nn.Module):
             bayesian_p=bayesian_p,
             bayesian_eval=bayesian_eval,
             return_intermediate=True,
+            use_graph=decoder_use_graph,
+            use_query_mamba=decoder_use_query_mamba,
         )
 
         # ----- Prediction Heads -----
@@ -775,6 +779,8 @@ def build_model(cfg: dict) -> "BSGMCellTrack":
         swin_window_size=cfg.get("swin_window_size", 7),
         swin_pretrained=cfg.get("swin_pretrained", None),
         backbone_pretrained=cfg.get("backbone_pretrained", None),
+        decoder_use_graph=cfg.get("decoder_use_graph", True),
+        decoder_use_query_mamba=cfg.get("decoder_use_query_mamba", True),
         d_model=cfg.get("hidden_dim", 256),
         nhead=cfg.get("nheads", 8),
         num_encoder_layers=cfg.get("enc_layers", 4),
