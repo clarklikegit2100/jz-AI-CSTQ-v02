@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 from ai_cstq.models import build_model
 from ai_cstq.util.ctc_io import predictions_to_ctc, run_ctc_eval
 from ai_cstq.util.misc import load_checkpoint
+from ai_cstq.util.tiled_inference import run_tiled_inference
 
 try:
     import tifffile
@@ -49,6 +50,20 @@ def parse_args():
     p.add_argument("--eval", action="store_true", help="Run CTC evaluation after inference")
     p.add_argument("--gt_dir", default=None, help="GT directory for evaluation")
     p.add_argument("--eval_bin_dir", default=None, help="CTC binary evaluation tools directory")
+    p.add_argument("--tile_size", type=int, default=None,
+                   help="Enable tiled inference: slide a tile_size x tile_size window over "
+                        "the full-resolution frame instead of downscaling it. Use the same "
+                        "value the checkpoint was trained with (see cfg tile_size).")
+    p.add_argument("--tile_overlap", type=int, default=64)
+    p.add_argument("--merge_iou_thresh", type=float, default=0.3,
+                   help="Mask IoU above which two tiles' detections are merged as one cell.")
+    p.add_argument("--merge_centroid_frac", type=float, default=0.3,
+                   help="Centroid distance (as a fraction of tile_size) below which two "
+                        "tiles' detections are merged as one cell.")
+    p.add_argument("--track_iou_thresh", type=float, default=0.3,
+                   help="Mask IoU above which a detection is matched to a previous-frame track.")
+    p.add_argument("--track_max_age", type=int, default=0,
+                   help="Frames a track may go undetected before it is retired.")
     return p.parse_args()
 
 
@@ -225,15 +240,31 @@ def main():
 
     # Run inference
     print("Running inference...")
-    all_outputs, img_hw = run_inference(
-        model=model,
-        frame_files=frame_files,
-        device=device,
-        target_size=target_size,
-        in_channels=in_channels,
-        conf_threshold=args.conf_threshold,
-        mc_samples=args.mc_samples,
-    )
+    if args.tile_size:
+        print(f"  tiled mode: tile_size={args.tile_size} overlap={args.tile_overlap}")
+        all_outputs, img_hw = run_tiled_inference(
+            model=model,
+            frame_files=frame_files,
+            device=device,
+            in_channels=in_channels,
+            tile_size=args.tile_size,
+            tile_overlap=args.tile_overlap,
+            conf_threshold=args.conf_threshold,
+            merge_iou_thresh=args.merge_iou_thresh,
+            merge_centroid_frac=args.merge_centroid_frac,
+            track_iou_thresh=args.track_iou_thresh,
+            track_max_age=args.track_max_age,
+        )
+    else:
+        all_outputs, img_hw = run_inference(
+            model=model,
+            frame_files=frame_files,
+            device=device,
+            target_size=target_size,
+            in_channels=in_channels,
+            conf_threshold=args.conf_threshold,
+            mc_samples=args.mc_samples,
+        )
 
     # Write CTC output
     print(f"Writing CTC output to {args.output}...")
