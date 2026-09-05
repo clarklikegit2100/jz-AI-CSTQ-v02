@@ -1,0 +1,66 @@
+base_config: base_bsgm.yaml
+
+# Held-out generalisation check: same tiled-training setup as gowt1_tile_train
+# (SEG ~0.73 full-resolution, but train==val on all 460 frames -- a
+# memorisation number, not generalisation) but train on GOWT1 sequences
+# 01-04 only and validate on sequence 05, which the model never sees during
+# training. The real generalisation number comes from running
+# `infer.py --tile_size 256` on the held-out sequence 05 frames and scoring
+# against their ground truth (this config's val loss is just a training-time
+# monitor, not the reported metric).
+output_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000004-jz-AI-CSTQ-v02-20260902/03-Result/diagnostics/gowt1_tile_holdout
+dataset: ctcgowt1_exp000004_tile_holdout
+seed: 42
+train_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+train_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+train_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+val_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+val_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+val_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+
+# --- held-out split (new): no sequence overlap between train and val ---
+train_sequences: ["01", "02", "03", "04"]
+val_sequences: ["05"]
+
+backbone: resnet50
+backbone_pretrained: true
+decoder_use_graph: false
+decoder_use_query_mamba: false
+
+dn_number: 5
+dn_box_noise_scale: 0.4
+dn_aux: false
+
+mask_stride: 4
+
+tile_size: 256
+tile_pos_ratio: 0.7
+tile_min_area_ratio: 0.3
+
+target_size: [256, 256]
+num_queries: 20
+batch_size: 1
+num_workers: 4
+epochs: 70
+warmup_epochs: 3
+mask_warmup_epochs: 5
+max_track_queries: 0
+use_amp: false
+save_checkpoint_every: 5
+lr: 0.0002
+lr_backbone: 0.00002
+lr_drop: 50
+mask_lr_mult: 2.0
+clip_max_norm: 1.0
+max_val_steps: 40
+
+mask_num_points: 12544
+mask_gt_bbox_fraction: 0.5
+cost_mask_points: 3000
+mask_loss_type: bce
+
+cls_loss_coef: 2.0
+bbox_loss_coef: 5.0
+giou_loss_coef: 2.0
+mask_loss_coef: 5.0
+dice_loss_coef: 5.0

@@ -109,6 +109,10 @@ class CTCCocoDataset(Dataset):
         tile_size: Optional[int] = None,
         tile_pos_ratio: float = 0.7,
         tile_min_area_ratio: float = 0.3,
+        # Held-out split: restrict this dataset to a subset of CTC sequences
+        # (e.g. train on "01".."04", validate on "05"). None = use every
+        # sequence in the annotation file.
+        sequence_filter: Optional[List[str]] = None,
     ):
         self.img_dir = img_dir
         self.ignore_dir = ignore_dir
@@ -121,6 +125,7 @@ class CTCCocoDataset(Dataset):
         self.tile_size = tile_size
         self.tile_pos_ratio = tile_pos_ratio
         self.tile_min_area_ratio = tile_min_area_ratio
+        allowed = set(str(s) for s in sequence_filter) if sequence_filter is not None else None
         # Build temporal windows independently inside each generated/CTC sequence.
         # COCO ids are global and therefore cannot safely define adjacency.
         sequences: Dict[str, List[int]] = {}
@@ -132,7 +137,14 @@ class CTCCocoDataset(Dataset):
                 or info.get("sequence_id")
                 or self._sequence_from_filename(info.get("file_name", ""))
             )
+            if allowed is not None and sequence not in allowed:
+                continue
             sequences.setdefault(sequence, []).append(image_id)
+        if allowed is not None and not sequences:
+            raise ValueError(
+                f"sequence_filter={sorted(allowed)} matched no images in {ann_file} "
+                f"(available sequences: {sorted({str(self.coco.images[i].get('man_track_id') or self.coco.images[i].get('ctc_id') or self.coco.images[i].get('sequence_id') or self._sequence_from_filename(self.coco.images[i].get('file_name', ''))) for i in self.coco.image_ids})})"
+            )
         self.sequence_ids = {
             key: sorted(ids, key=lambda iid: self._frame_number(self.coco.images[iid]))
             for key, ids in sequences.items()
@@ -443,6 +455,7 @@ def build_dataset(cfg: dict, split: str = "train") -> CTCCocoDataset:
         tile_size=tile_size,
         tile_pos_ratio=cfg.get("tile_pos_ratio", 0.7),
         tile_min_area_ratio=cfg.get("tile_min_area_ratio", 0.3),
+        sequence_filter=cfg.get(f"{split}_sequences"),
     )
     max_samples = cfg.get(f"{split}_max_samples")
     if max_samples is not None:
