@@ -281,6 +281,7 @@ class BSGMCellTrack(nn.Module):
         nhead: int = 8,
         num_encoder_layers: int = 4,
         num_decoder_layers: int = 6,
+        encoder_type: str = "global",   # "global" (O(S^2)) | "ms_deformable" (O(S))
         dim_feedforward: int = 1024,
         dropout: float = 0.1,
         num_feature_levels: int = 4,
@@ -367,8 +368,18 @@ class BSGMCellTrack(nn.Module):
         nn.init.normal_(self.level_embed)
 
         # ----- Encoder -----
-        enc_layer = DeformableEncoderLayer(d_model, dim_feedforward, dropout, nhead)
-        self.encoder = DeformableEncoder(enc_layer, num_encoder_layers)
+        self.encoder_type = encoder_type
+        if encoder_type == "ms_deformable":
+            from .ms_deform_attn import MSDeformEncoder
+            self.encoder = MSDeformEncoder(
+                num_layers=num_encoder_layers, d_model=d_model, d_ffn=dim_feedforward,
+                dropout=dropout, n_heads=nhead, n_levels=num_feature_levels, n_points=n_points,
+            )
+        elif encoder_type == "global":
+            enc_layer = DeformableEncoderLayer(d_model, dim_feedforward, dropout, nhead)
+            self.encoder = DeformableEncoder(enc_layer, num_encoder_layers)
+        else:
+            raise ValueError(f"unknown encoder_type {encoder_type!r}")
         self.enc_bayes_drop = BayesianDropout(bayesian_p, bayesian_eval)
 
         # ----- Two-stage (region proposals from encoder) -----
@@ -645,7 +656,10 @@ class BSGMCellTrack(nn.Module):
         # ---- Encoder ----
         src, pos, padding_mask, spatial_shapes, level_start = self.prepare_encoder_input(fused_fpn)
         src = self.enc_bayes_drop(src)
-        memory = self.encoder(src, pos, padding_mask)
+        if self.encoder_type == "ms_deformable":
+            memory = self.encoder(src, pos, spatial_shapes, level_start, padding_mask)
+        else:
+            memory = self.encoder(src, pos, padding_mask)
 
         # ---- Query initialisation ----
         num_track = 0
@@ -894,6 +908,7 @@ def build_model(cfg: dict) -> "BSGMCellTrack":
         nhead=cfg.get("nheads", 8),
         num_encoder_layers=cfg.get("enc_layers", 4),
         num_decoder_layers=cfg.get("dec_layers", 6),
+        encoder_type=cfg.get("encoder_type", "global"),
         dim_feedforward=cfg.get("dim_feedforward", 1024),
         dropout=cfg.get("dropout", 0.1),
         num_feature_levels=cfg.get("num_feature_levels", 4),

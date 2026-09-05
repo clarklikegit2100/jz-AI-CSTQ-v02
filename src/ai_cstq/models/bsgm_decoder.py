@@ -121,6 +121,9 @@ class DeformableCrossAttention(nn.Module):
             value = value.masked_fill(memory_padding_mask.unsqueeze(-1), 0)
 
         value = value.view(B, Nm, self.num_heads, self.head_dim)  # (B, Nm, H, Dh)
+        # NOTE: sampling below must read from `value` (the value_proj output),
+        # not the raw `memory` -- the projection was previously computed and
+        # then ignored (resolution_scaling_plan.md Phase 2 decoder fix).
 
         offsets = self.sampling_offsets(query)  # (B, Nq, H*L*P*2)
         offsets = offsets.view(B, Nq, self.num_heads, self.num_levels, self.n_points, 2)
@@ -139,7 +142,7 @@ class DeformableCrossAttention(nn.Module):
             H_lvl, W_lvl = int(H_lvl), int(W_lvl)
             start = int(level_start_index[lvl].item())
             end = start + H_lvl * W_lvl
-            mem_lvl = memory[:, start:end].reshape(B, H_lvl, W_lvl, self.num_heads, self.head_dim)
+            mem_lvl = value[:, start:end].reshape(B, H_lvl, W_lvl, self.num_heads, self.head_dim)
 
             # Sampling locations for this level
             off = offsets[:, :, :, lvl, :, :]   # (B, Nq, H, P, 2)
