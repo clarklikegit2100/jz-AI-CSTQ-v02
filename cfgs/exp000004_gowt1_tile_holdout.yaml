@@ -41,7 +41,9 @@ target_size: [256, 256]
 num_queries: 20
 batch_size: 1
 num_workers: 4
-epochs: 70
+# Match gowt1_tile_train's schedule exactly (was 70/50) so a held-out/no-holdout
+# comparison isn't confounded by a different epoch budget.
+epochs: 60
 warmup_epochs: 3
 mask_warmup_epochs: 5
 max_track_queries: 0
@@ -49,7 +51,7 @@ use_amp: false
 save_checkpoint_every: 5
 lr: 0.0002
 lr_backbone: 0.00002
-lr_drop: 50
+lr_drop: 45
 mask_lr_mult: 2.0
 clip_max_norm: 1.0
 max_val_steps: 40

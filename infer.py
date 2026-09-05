@@ -60,6 +60,10 @@ def parse_args():
     p.add_argument("--merge_centroid_frac", type=float, default=0.3,
                    help="Centroid distance (as a fraction of tile_size) below which two "
                         "tiles' detections are merged as one cell.")
+    p.add_argument("--mask_roi_pad", type=float, default=0.3,
+                   help="Confine each query's mask to its own predicted box padded by this "
+                        "fraction on each side, so a degenerate mask cannot grow past a "
+                        "plausible cell region.")
     p.add_argument("--track_iou_thresh", type=float, default=0.3,
                    help="Mask IoU above which a detection is matched to a previous-frame track.")
     p.add_argument("--track_max_age", type=int, default=0,
@@ -252,6 +256,7 @@ def main():
             conf_threshold=args.conf_threshold,
             merge_iou_thresh=args.merge_iou_thresh,
             merge_centroid_frac=args.merge_centroid_frac,
+            mask_roi_pad=args.mask_roi_pad,
             track_iou_thresh=args.track_iou_thresh,
             track_max_age=args.track_max_age,
         )

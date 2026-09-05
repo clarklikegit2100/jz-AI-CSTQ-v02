@@ -106,6 +106,7 @@ def detect_frame_tiled(
     mask_threshold: float = 0.5,
     merge_iou_thresh: float = 0.3,
     merge_centroid_frac: float = 0.3,
+    mask_roi_pad: float = 0.3,
 ) -> List[Dict]:
     """
     Run the model on every tile of one frame and merge overlap-band
@@ -138,13 +139,28 @@ def detect_frame_tiled(
             cx, cy, bw, bh = boxes[qi, :4].tolist()
             full_cx, full_cy = (x0 + cx * ts) / W, (y0 + cy * ts) / H
             full_bw, full_bh = bw * ts / W, bh * ts / H
+
+            # Confine the mask to a padded region around the *model's own box
+            # prediction*. The box head is generally more robust than the mask
+            # head to distribution shift; without this, a mask head that fires
+            # broadly on unfamiliar image statistics (seen on held-out GOWT1
+            # sequences) balloons into a tile-sized blob once several such
+            # queries are stitched together, instead of failing as a merely
+            # low-quality but still cell-sized mask.
+            px1 = max(0.0, cx - bw / 2 * (1 + mask_roi_pad)) * ts
+            px2 = min(1.0, cx + bw / 2 * (1 + mask_roi_pad)) * ts
+            py1 = max(0.0, cy - bh / 2 * (1 + mask_roi_pad)) * ts
+            py2 = min(1.0, cy + bh / 2 * (1 + mask_roi_pad)) * ts
+            roi = torch.zeros(ts, ts, dtype=torch.bool, device=device)
+            roi[int(py1):max(int(py2), int(py1) + 1), int(px1):max(int(px2), int(px1) + 1)] = True
+
             raw.append({
                 "box_xyxy": torch.tensor([
                     full_cx - full_bw / 2, full_cy - full_bh / 2,
                     full_cx + full_bw / 2, full_cy + full_bh / 2,
                 ]),
                 "centre": (full_cx, full_cy),
-                "prob": pm_up[k],           # (ts, ts) on device
+                "prob": pm_up[k] * roi,      # (ts, ts) on device, RoI-confined
                 "y0": y0, "x0": x0,
                 "score": scores[qi].item(),
                 "hs": out["hs_embed"][0, qi].detach().cpu(),
@@ -296,6 +312,7 @@ def run_tiled_inference(
     mask_threshold: float = 0.5,
     merge_iou_thresh: float = 0.3,
     merge_centroid_frac: float = 0.3,
+    mask_roi_pad: float = 0.3,
     track_iou_thresh: float = 0.3,
     track_max_age: int = 0,
 ) -> Tuple[List[Dict], Tuple[int, int]]:
@@ -334,6 +351,7 @@ def run_tiled_inference(
             tile_size=tile_size, tile_overlap=tile_overlap,
             conf_threshold=conf_threshold, mask_threshold=mask_threshold,
             merge_iou_thresh=merge_iou_thresh, merge_centroid_frac=merge_centroid_frac,
+            mask_roi_pad=mask_roi_pad,
         )
         frames_dets.append(dets)
         print(f"  Frame {t_idx + 1}/{T}  tiles merged -> {len(dets)} instances")

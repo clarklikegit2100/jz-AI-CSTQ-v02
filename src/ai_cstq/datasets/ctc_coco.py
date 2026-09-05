@@ -279,9 +279,20 @@ class CTCCocoDataset(Dataset):
 
     def _sample_tile_origin(self, target: Dict, H: int, W: int) -> Tuple[int, int]:
         """
-        Pick a tile origin: `tile_pos_ratio` of the time centred (with jitter)
-        on a random ground-truth cell, otherwise a uniform crop. Both crowded
-        and background tiles are needed so the model also learns "no cell here".
+        Pick a tile origin: `tile_pos_ratio` of the time a random ground-truth
+        cell is placed *somewhere* in the tile (jitter spans the full tile, so
+        the cell can land dead-centre, near an edge, or straddling one), the
+        rest of the time a uniform/background crop.
+
+        Sliding-window tiled *inference* covers the frame on a fixed grid, so a
+        cell's position within whichever tile contains it is effectively
+        random -- centred, edge-hugging, anything. Jittering only a fraction of
+        the tile (as an earlier version of this method did) never showed the
+        model a cell near a tile edge during training; the model then
+        overfits to "cells are near tile centre" and its masks degrade on the
+        boundary-heavy tiles real sliding-window inference produces (see
+        03-Result/diagnostics/gowt1_tile_holdout/ for the failure this caused
+        even on in-training-distribution frames, not just held-out ones).
         """
         ts = self.tile_size
         max_y0, max_x0 = max(H - ts, 0), max(W - ts, 0)
@@ -290,9 +301,11 @@ class CTCCocoDataset(Dataset):
             i = valid_idx[random.randrange(len(valid_idx))].item()
             ys, xs = torch.where(target["masks"][i])
             cy, cx = ys.float().mean().item(), xs.float().mean().item()
-            jitter = ts * 0.3
-            y0 = int(cy - ts / 2 + random.uniform(-jitter, jitter))
-            x0 = int(cx - ts / 2 + random.uniform(-jitter, jitter))
+            # Jitter over the full tile span (not just +-30%) so the cell's
+            # position within the tile, once cropped, is uniform over [0, ts]
+            # -- matching the distribution a fixed inference grid produces.
+            y0 = int(cy - random.uniform(0, ts))
+            x0 = int(cx - random.uniform(0, ts))
         else:
             y0 = random.randint(0, max_y0) if max_y0 > 0 else 0
             x0 = random.randint(0, max_x0) if max_x0 > 0 else 0
