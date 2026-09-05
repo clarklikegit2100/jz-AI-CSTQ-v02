@@ -1,0 +1,57 @@
+base_config: base_bsgm.yaml
+
+# resolution_scaling_plan.md Phase 2: genuine multi-scale deformable encoder,
+# 512x512 WHOLE-FRAME input (native 1024 -> 512, a 2x downscale so a ~74px
+# GOWT1 nucleus stays ~37px -- vs ~18px for the 4x whole-frame downscale to
+# 256, and vs ~74px for native 256 tiles). Direct comparison target:
+# gowt1_tile_train (256 native tiles + stitched inference) = SEG 0.73.
+output_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000004-jz-AI-CSTQ-v02-20260902/03-Result/diagnostics/gowt1_deform512
+dataset: ctcgowt1_exp000004_deform
+seed: 42
+train_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+train_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+train_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+val_ann_file: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/annotations/train/anno.json
+val_img_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/img
+val_ignore_dir: /home/clark/Documents/GitHub/jz-AI-Experiments/all-exps/exp000002-jz-AI-CSTQ-20260830-v1/03-Result/stage1_data/ctcgowt1_fold_a_mild/COCO/train/ignore
+
+backbone: resnet50
+backbone_pretrained: true
+decoder_use_graph: false
+decoder_use_query_mamba: false
+
+encoder_type: ms_deformable
+
+dn_number: 5
+dn_box_noise_scale: 0.4
+dn_aux: false
+
+mask_stride: 4
+
+target_size: [512, 512]
+num_queries: 40
+batch_size: 1
+num_workers: 4
+epochs: 45
+warmup_epochs: 3
+mask_warmup_epochs: 5
+max_track_queries: 0
+use_amp: false
+save_checkpoint_every: 5
+lr: 0.0002
+lr_backbone: 0.00002
+lr_drop: 35
+mask_lr_mult: 2.0
+clip_max_norm: 1.0
+max_val_steps: 40
+
+mask_num_points: 8192
+mask_gt_bbox_fraction: 0.5
+cost_mask_points: 3000
+mask_loss_type: bce
+
+cls_loss_coef: 2.0
+bbox_loss_coef: 5.0
+giou_loss_coef: 2.0
+mask_loss_coef: 5.0
+dice_loss_coef: 5.0
