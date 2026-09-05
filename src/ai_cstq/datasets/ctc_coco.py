@@ -109,6 +109,7 @@ class CTCCocoDataset(Dataset):
         tile_size: Optional[int] = None,
         tile_pos_ratio: float = 0.7,
         tile_min_area_ratio: float = 0.3,
+        tile_jitter_frac: float = 0.3,
         # Held-out split: restrict this dataset to a subset of CTC sequences
         # (e.g. train on "01".."04", validate on "05"). None = use every
         # sequence in the annotation file.
@@ -125,6 +126,7 @@ class CTCCocoDataset(Dataset):
         self.tile_size = tile_size
         self.tile_pos_ratio = tile_pos_ratio
         self.tile_min_area_ratio = tile_min_area_ratio
+        self.tile_jitter_frac = tile_jitter_frac
         allowed = set(str(s) for s in sequence_filter) if sequence_filter is not None else None
         # Build temporal windows independently inside each generated/CTC sequence.
         # COCO ids are global and therefore cannot safely define adjacency.
@@ -279,20 +281,10 @@ class CTCCocoDataset(Dataset):
 
     def _sample_tile_origin(self, target: Dict, H: int, W: int) -> Tuple[int, int]:
         """
-        Pick a tile origin: `tile_pos_ratio` of the time a random ground-truth
-        cell is placed *somewhere* in the tile (jitter spans the full tile, so
-        the cell can land dead-centre, near an edge, or straddling one), the
-        rest of the time a uniform/background crop.
-
-        Sliding-window tiled *inference* covers the frame on a fixed grid, so a
-        cell's position within whichever tile contains it is effectively
-        random -- centred, edge-hugging, anything. Jittering only a fraction of
-        the tile (as an earlier version of this method did) never showed the
-        model a cell near a tile edge during training; the model then
-        overfits to "cells are near tile centre" and its masks degrade on the
-        boundary-heavy tiles real sliding-window inference produces (see
-        03-Result/diagnostics/gowt1_tile_holdout/ for the failure this caused
-        even on in-training-distribution frames, not just held-out ones).
+        Pick a tile origin: `tile_pos_ratio` of the time centred (jittered by
+        +- `tile_jitter_frac` of the tile) on a random ground-truth cell, the
+        rest of the time a uniform/background crop. Both crowded and background
+        tiles are needed so the model also learns "no cell here".
         """
         ts = self.tile_size
         max_y0, max_x0 = max(H - ts, 0), max(W - ts, 0)
@@ -301,11 +293,12 @@ class CTCCocoDataset(Dataset):
             i = valid_idx[random.randrange(len(valid_idx))].item()
             ys, xs = torch.where(target["masks"][i])
             cy, cx = ys.float().mean().item(), xs.float().mean().item()
-            # Jitter over the full tile span (not just +-30%) so the cell's
-            # position within the tile, once cropped, is uniform over [0, ts]
-            # -- matching the distribution a fixed inference grid produces.
-            y0 = int(cy - random.uniform(0, ts))
-            x0 = int(cx - random.uniform(0, ts))
+            # `tile_jitter_frac` fraction of the tile is the +- range the cell's
+            # centre is offset from the tile centre. 0.3 keeps the cell in the
+            # central band; 1.0 lets it land anywhere including the edges.
+            j = self.tile_jitter_frac * ts
+            y0 = int(cy - ts / 2 + random.uniform(-j, j))
+            x0 = int(cx - ts / 2 + random.uniform(-j, j))
         else:
             y0 = random.randint(0, max_y0) if max_y0 > 0 else 0
             x0 = random.randint(0, max_x0) if max_x0 > 0 else 0
@@ -468,6 +461,7 @@ def build_dataset(cfg: dict, split: str = "train") -> CTCCocoDataset:
         tile_size=tile_size,
         tile_pos_ratio=cfg.get("tile_pos_ratio", 0.7),
         tile_min_area_ratio=cfg.get("tile_min_area_ratio", 0.3),
+        tile_jitter_frac=cfg.get("tile_jitter_frac", 0.3),
         sequence_filter=cfg.get(f"{split}_sequences"),
     )
     max_samples = cfg.get(f"{split}_max_samples")
