@@ -32,7 +32,7 @@ target_size: [512, 512]
 num_queries: 40
 batch_size: 1
 num_workers: 4
-epochs: 45
+epochs: 70
 warmup_epochs: 3
 mask_warmup_epochs: 5
 max_track_queries: 0
@@ -40,7 +40,7 @@ use_amp: false
 save_checkpoint_every: 5
 lr: 0.0002
 lr_backbone: 0.00002
-lr_drop: 35
+lr_drop: 55
 mask_lr_mult: 2.0
 clip_max_norm: 1.0
 max_val_steps: 40
